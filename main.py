@@ -3,13 +3,22 @@ import base64
 import io
 import os
 import random
+import sys
 import wave
 from typing import Optional
+
+# 插件管理器用 spec_from_file_location 加载 main.py，不会把插件目录加入 sys.path；
+# 显式加入以便导入同目录的 queue_merge 模块（独立插件部署必需）
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
 
 from core.plugin import BasePlugin, logger, on, Priority
 from core.chat.message_utils import KiraMessageEvent, KiraMessageBatchEvent
 from core.provider import LLMRequest
 from core.chat.message_elements import Text, Image, Reply, Sticker, Forward, Record
+from queue_merge import BatchMergeScheduler
+from media_recognize import ParallelMediaRecognizer
 
 
 class DebouncePlugin(BasePlugin):
@@ -30,7 +39,7 @@ class DebouncePlugin(BasePlugin):
 
         # 图片/表情/转发消息处理配置
         self.image_recognition_only_on_mention = cfg.get("image_recognition_only_on_mention", True)
-        self.image_recognition_probability = float(cfg.get("image_recognition_probability", 0.5))
+        self.image_recognition_probability = float(cfg.get("image_recognition_probability", 1.0))
         self.max_images_per_message = int(cfg.get("max_images_per_message", 3))
         self.forward_recognition_only_on_mention = cfg.get("forward_recognition_only_on_mention", True)
 
@@ -38,6 +47,11 @@ class DebouncePlugin(BasePlugin):
         self.voice_recognition_only_on_mention = cfg.get("voice_recognition_only_on_mention", True)
         self.voice_private_need_mention = cfg.get("voice_private_need_mention", True)  # 私聊是否需要@/回复
         self.voice_max_duration = int(cfg.get("voice_max_duration", 0))
+
+        # 队列合并 / 积压处理（BatchMergeScheduler）
+        self.merge_scheduler = BatchMergeScheduler(ctx, self.plugin_cfg, bot_cfg)
+        # 并行媒体识别（ParallelMediaRecognizer）
+        self.media_recognizer = ParallelMediaRecognizer(ctx, self.plugin_cfg, bot_cfg)
 
     async def initialize(self):
         logger.info(f"[Debounce] enabled (group media/forward/voice control, private unchanged)")
@@ -50,6 +64,8 @@ class DebouncePlugin(BasePlugin):
             await asyncio.gather(*self.session_tasks.values(), return_exceptions=True)
         self.session_tasks.clear()
         self.session_events.clear()
+        # 清理合并调度器（重发 pending + 取消 tick）
+        await self.merge_scheduler.shutdown()
         logger.debug("[Debounce] All debounce tasks cancelled")
 
     # MP3 码率表（kbps）：MPEG1 Layer III / MPEG2&2.5 Layer III
@@ -280,3 +296,33 @@ class DebouncePlugin(BasePlugin):
                 if p.name == "chat_env":
                     p.content += self.group_chat_prompt
                     break
+
+    # ================= 队列合并 / 积压处理（转发给 BatchMergeScheduler） =================
+
+    @on.im_batch_message(priority=Priority.HIGH)
+    async def on_queue_merge_batch(self, event: KiraMessageBatchEvent, *_):
+        await self.merge_scheduler.on_batch_message(event)
+
+    @on.llm_response(priority=Priority.HIGH)
+    async def on_queue_merge_resp(self, event: KiraMessageBatchEvent, resp, *_):
+        await self.merge_scheduler.on_llm_response(event, resp)
+
+    @on.step_result(priority=Priority.HIGH)
+    async def on_queue_merge_step(self, event: KiraMessageBatchEvent, *_):
+        await self.merge_scheduler.on_step_result(event)
+
+    # ================= 并行媒体识别（转发给 ParallelMediaRecognizer） =================
+    # 注意：im_message 钩子必须定义在 handle_msg 之后（同优先级按注册顺序执行），
+    #       保证"非唤醒不识别"配置先由 handle_msg 处理（兼容前提）
+
+    @on.im_message(priority=Priority.HIGH)
+    async def on_media_rec_im(self, event: KiraMessageEvent, *_):
+        await self.media_recognizer.on_im_message(event)
+
+    @on.im_batch_message(priority=Priority.HIGH)
+    async def on_media_rec_batch(self, event: KiraMessageBatchEvent, *_):
+        await self.media_recognizer.on_im_batch_message(event)
+
+    @on.llm_request(priority=Priority.HIGH)
+    async def on_media_rec_llm(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
+        await self.media_recognizer.on_llm_request(event, req)
