@@ -10,7 +10,10 @@
 - 用"事件配对"判定 in-flight 完成（0 延迟，无 release_delay）：
     ON_LLM_RESPONSE 无 tool_calls = 最后一步（文本收尾）-> 标记 _final_marked
     ON_STEP_RESULT（消息发送后触发）同 event_id 且已标记 -> 执行推送决策
-- 自拦截防护：自己推送的（合并/重放）批次在 on_batch_message 直接放行，防死循环
+- 自拦截防护：合并/重放批次打 _qm_self 自发布标记，on_batch_message 识别后无条件放行
+  （不依赖 in-flight 匹配，对竞态/重复事件/重放路径免疫，防死循环）
+- 推送决策双保险：on_step_result 传入 done_event_id，_push_pending 锁内确认 in-flight
+  仍是本次完成事件才执行（hook 重复注册/事件重复广播时跳过，不误清 in-flight）
 - 积压媒体限制（media_preprocess_enabled + media_preprocess_max_batches）：
     含媒体批次在 pending 已满上限时直接放行独立处理，避免媒体无限积压 + VLM/STT 重复预处理
 - 调试日志开关（debug_log_enabled）：开启后打印放行/拦截/三分支/拆批等状态，便于排查
@@ -117,9 +120,16 @@ class BatchMergeScheduler:
             return
         sid = event.session.sid
         async with self._lock:
+            # 自己推送的（合并/重放）批次：_qm_self 自发布标记直接放行（双保险，
+            # 不依赖 in-flight 匹配——异步窗口/重复事件下 in-flight 可能已被误清）。
+            # 同时恢复 in-flight 跟踪，确保收尾事件能触发下一轮推送决策。
+            if event.extra.get("_qm_self"):
+                self._inflight[sid] = event.event_id
+                self._inflight_since[sid] = time.time()
+                self._log(sid, f"自发布批次 {event.event_id} 直接放行（_qm_self）")
+                return
             if self._inflight.get(sid) == event.event_id:
-                # 自己推送的（合并/重放）批次：in-flight 就是它自己，直接放行，
-                # 防止"推送 -> 到达 -> 拦截自己 -> 超时再推 -> 再拦截"的死循环
+                # 兼容旧路径：in-flight 匹配也放行（无 _qm_self 标记的历史批次）
                 return
             if sid in self._inflight or self._pending.get(sid):
                 # 积压媒体限制：pending 中已积压的含媒体批次达到上限时，
@@ -155,23 +165,36 @@ class BatchMergeScheduler:
                     self._log(sid, f"批次 {event.event_id} 进入最后一步（文本收尾）")
 
     async def on_step_result(self, event: KiraMessageBatchEvent, *_):
-        """ON_STEP_RESULT：最后一步消息已发送完（事实 #9）-> 执行推送决策（0 延迟）。"""
+        """ON_STEP_RESULT：最后一步消息已发送完（事实 #9）-> 执行推送决策（0 延迟）。
+
+        ⚠️ done_event_id 校验：KiraAI EventBus.publish 只是异步入队，hook 分发在
+        dispatch() 消费循环异步执行；hook 重复注册（热重载累积）时 ON_STEP_RESULT 会
+        对同一 event 广播多次。无校验时第二次调用会无条件清 _inflight，导致刚发布的
+        合并批次到达 on_batch_message 时匹配不上、被误判为外部批次拦截进 pending，
+        与 ContextCondensation 等阻塞型插件共存时稳定复现队列死锁。"""
         if not self.enabled:
             return
         sid = event.session.sid
         need_push = False
         async with self._lock:
+            # 锁内只判定；真正的二次校验在 _push_pending 锁内再做（双保险）
             if self._inflight.get(sid) == event.event_id and sid in self._final_marked:
                 need_push = True
         if need_push:
-            await self._push_pending(sid)
+            await self._push_pending(sid, event.event_id)
 
     # ================= 推送决策（三分支，串行） =================
 
-    async def _push_pending(self, sid: str):
-        """锁内决策 + 状态更新，锁外 publish。并发调用时第二个 pop 空直接返回，安全。"""
+    async def _push_pending(self, sid: str, done_event_id: str):
+        """锁内决策 + 状态更新，锁外 publish。
+
+        ⚠️ done_event_id 双保险：_decide_and_apply_locked 会无条件清 _inflight，
+        只有 in-flight 仍是本次完成事件时才允许执行；重复/过期广播直接跳过，不误清状态。"""
         to_publish = None
         async with self._lock:
+            if self._inflight.get(sid) != done_event_id:
+                self._log(sid, f"忽略过期完成事件 {done_event_id}（in-flight={self._inflight.get(sid)}）")
+                return
             to_publish = self._decide_and_apply_locked(sid)
         if to_publish is not None:
             n_msgs = len(to_publish.messages)
@@ -293,7 +316,8 @@ class BatchMergeScheduler:
             adapter=last.adapter,
             session=last.session,
             messages=msgs,
-            extra={"merged_from": [b.batch.event_id for b in batches]},
+            extra={"merged_from": [b.batch.event_id for b in batches],
+                   "_qm_self": True},  # 自发布标记：on_batch_message 识别后无条件放行
         )
         return merged
 
