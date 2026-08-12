@@ -123,8 +123,8 @@ class BatchMergeScheduler:
             # 自己推送的（合并/重放）批次：_qm_self 自发布标记直接放行（双保险，
             # 不依赖 in-flight 匹配——异步窗口/重复事件下 in-flight 可能已被误清）。
             # 同时恢复 in-flight 跟踪，确保收尾事件能触发下一轮推送决策。
-            # 外部批次（core trigger/flush 创建）extra 默认 None，判空后再取标记
-            if (event.extra or {}).get("_qm_self"):
+            # 外部批次（core trigger/flush 创建）extra 默认 None，判空后再取标记（与 S 版对齐）
+            if event.extra and event.extra.get("_qm_self"):
                 self._inflight[sid] = event.event_id
                 self._inflight_since[sid] = time.time()
                 self._log(sid, f"自发布批次 {event.event_id} 直接放行（_qm_self）")
