@@ -5,7 +5,7 @@
 - 推送决策三分支（都在 in-flight 完成时执行，串行）：
     分支① 软合并：pending 消息总数 <= 软合并上限 且 <= 合并消息数上限 且估 token <= 上限 -> 提前合并（不等超时）
     分支② 超时合并：pending 攒批时间 >= max_merge_seconds -> 合并（无论消息数，超限拆批）；
-                   =0 时恒成立（不攒批，当前批次完成即全量合并，拆批由各上限控制）
+                  =0 时恒成立（不攒批，当前批次完成即全量合并，拆批由各上限控制）
     分支③ 独立推送：都不满足 -> 只推第一个批次（1:1），其余留 pending 等下一轮
 - 用"事件配对"判定 in-flight 完成（0 延迟，无 release_delay）：
     ON_LLM_RESPONSE 无 tool_calls = 最后一步（文本收尾）-> 标记 _final_marked
@@ -123,8 +123,9 @@ class BatchMergeScheduler:
             # 自己推送的（合并/重放）批次：_qm_self 自发布标记直接放行（双保险，
             # 不依赖 in-flight 匹配——异步窗口/重复事件下 in-flight 可能已被误清）。
             # 同时恢复 in-flight 跟踪，确保收尾事件能触发下一轮推送决策。
-            # 外部批次（core trigger/flush 创建）extra 默认 None，判空后再取标记
-            if (event.extra or {}).get("_qm_self"):
+            # 外部批次（core trigger/flush 创建）extra 默认 None，判空后再取标记（与 S 版对齐）
+            extra = getattr(event, "extra", None) or {}
+            if extra.get("_qm_self"):
                 self._inflight[sid] = event.event_id
                 self._inflight_since[sid] = time.time()
                 self._log(sid, f"自发布批次 {event.event_id} 直接放行（_qm_self）")
