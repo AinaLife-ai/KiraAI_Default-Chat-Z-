@@ -209,6 +209,20 @@ class DebouncePlugin(BasePlugin):
 
     # ========== 骚扰屏蔽 XML tag（戳/at/关键词/引用） ==========
 
+    @register.tag(name="wake_extend", description="休眠唤醒后主动续窗。输出 <wake_extend>yes</wake_extend> 延长维持期（受 wake_max_extensions 限制）。")
+    async def handle_wake_extend(self, value: str, **kwargs) -> list:
+        try:
+            sid = self._last_ignore_sid
+        except AttributeError:
+            sid = None
+        if sid is None:
+            return []
+        if (value or "").strip().lower() == "yes":
+            result = self.enhance.dormant.extend(sid, __import__("time").time())
+            if result:
+                logger.info(f"[Enhance] 主动续窗: {result}")
+        return []
+
     @register.tag(name="poke_ignore", description="屏蔽戳一戳骚扰。输出 <poke_ignore>user|duration:N</poke_ignore> 屏蔽目标用户，<poke_ignore>all|duration:N</poke_ignore> 屏蔽所有用户，<poke_ignore>none</poke_ignore> 不屏蔽。duration 为秒，留空用默认值。")
     async def handle_poke_ignore(self, value: str, **kwargs) -> list:
         return self._apply_ignore_tag("poke", value)
@@ -479,6 +493,14 @@ class DebouncePlugin(BasePlugin):
         if getattr(resp, "tool_calls", None):
             return
         self.enhance.on_llm_response(event, resp)
+        # 休眠维持期次数限制：达上限则结束维持期（wake_max_rounds 生效）
+        try:
+            sid = str(event.sid)
+        except Exception:
+            sid = None
+        if sid and not self.enhance.dormant.can_reply(sid):
+            self.enhance.dormant._awake_until.pop(sid, None)
+            logger.debug(f"[Enhance] 休眠维持期达最大互动次数，结束: {sid}")
 
     @on.llm_response(priority=Priority.HIGH)
     async def on_queue_merge_resp(self, event: KiraMessageBatchEvent, resp, *_):
