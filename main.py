@@ -13,12 +13,23 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from core.plugin import BasePlugin, logger, on, Priority
+# 热重载只重新 import main.py，sys.modules 里缓存的同目录模块不会更新；
+# 强制重载，避免改了 queue_merge / media_recognize / chat_enhance 后热重载不生效
+import importlib
+for _m in ("queue_merge", "media_recognize", "chat_enhance"):
+    if _m in sys.modules:
+        try:
+            importlib.reload(sys.modules[_m])
+        except Exception:
+            pass
+
+from core.plugin import BasePlugin, logger, on, Priority, register
 from core.chat.message_utils import KiraMessageEvent, KiraMessageBatchEvent
 from core.provider import LLMRequest
 from core.chat.message_elements import Text, Image, Reply, Sticker, Forward, Record
 from queue_merge import BatchMergeScheduler
 from media_recognize import ParallelMediaRecognizer
+from chat_enhance import ChatEnhanceEngine
 
 
 class DebouncePlugin(BasePlugin):
@@ -53,8 +64,57 @@ class DebouncePlugin(BasePlugin):
         # 并行媒体识别（ParallelMediaRecognizer）
         self.media_recognizer = ParallelMediaRecognizer(ctx, self.plugin_cfg, bot_cfg)
 
+        # ========== 聊天增强引擎（存在感节流/骚扰感知化/休眠状态机/通知合并） ==========
+        # z 版 schema 是扁平结构，把新配置包成 section 结构传给引擎
+        _enhance_cfg = {
+            "presence_window_size": self.plugin_cfg.get("presence_window_size", 20),
+            "presence_decay_minutes": self.plugin_cfg.get("presence_decay_minutes", 10),
+            "presence_target_ratio": self.plugin_cfg.get("presence_target_ratio", 0.3),
+            "presence_k_min": self.plugin_cfg.get("presence_k_min", 0.2),
+            "presence_k_max": self.plugin_cfg.get("presence_k_max", 2.0),
+            "idle_bonus_score": self.plugin_cfg.get("idle_bonus_score", 15),
+            "force_suppress": self.plugin_cfg.get("force_suppress", False),
+            "score_gate_enabled": self.plugin_cfg.get("score_gate_enabled", False),
+            "score_threshold": self.plugin_cfg.get("score_threshold", 60),
+            "dormant_ranges": self.plugin_cfg.get("dormant_ranges", []),
+            "dormant_wake_probability": self.plugin_cfg.get("dormant_wake_probability", 0.3),
+            "wake_keep_mode": self.plugin_cfg.get("wake_keep_mode", "renew"),
+            "wake_keep_seconds": self.plugin_cfg.get("wake_keep_seconds", 300),
+            "wake_max_rounds": self.plugin_cfg.get("wake_max_rounds", -1),
+            "wake_max_extensions": self.plugin_cfg.get("wake_max_extensions", -1),
+        }
+        for _kind in ("poke", "at", "keyword", "reply"):
+            _enhance_cfg[f"section_{_kind}"] = {
+                "enabled": self.plugin_cfg.get(f"{_kind}_enabled", _kind in ("poke", "at")),
+                "window_seconds": self.plugin_cfg.get(f"{_kind}_window_seconds", 60),
+                "threshold": self.plugin_cfg.get(f"{_kind}_threshold", 3 if _kind != "keyword" else 5),
+                "default_duration": self.plugin_cfg.get(f"{_kind}_default_duration", 180),
+                "allow_bot_duration": self.plugin_cfg.get(f"{_kind}_allow_bot_duration", True),
+                "max_duration": self.plugin_cfg.get(f"{_kind}_max_duration", 300),
+                "scope": self.plugin_cfg.get(f"{_kind}_scope", "per_user"),
+            }
+        self.enhance = ChatEnhanceEngine(ctx, _enhance_cfg, self, merge_seconds=self.debounce_interval)
+
     async def initialize(self):
         logger.info(f"[Debounce] enabled (group media/forward/voice control, private unchanged)")
+        # 启动聊天增强引擎（存在感/骚扰/休眠/通知合并）
+        self.enhance.start()
+        # 接管互斥：检测独立防骚扰插件是否已加载，已加载则提示停用（本插件内置同能力）
+        try:
+            _pm = self.ctx.plugin_mgr
+            if _pm is not None:
+                _loaded = set()
+                try:
+                    _loaded = set(_pm.get_loaded_plugin_ids() or [])
+                except Exception:
+                    pass
+                if any("anti-harass" in str(pid).lower() for pid in _loaded):
+                    logger.warning(
+                        "[Enhance] 检测到独立防骚扰插件已加载，本插件已内置完整骚扰屏蔽能力，"
+                        "建议停用独立防骚扰插件避免重复检测/重复通知"
+                    )
+        except Exception:
+            pass
 
     async def terminate(self):
         for sid, task in list(self.session_tasks.items()):
@@ -66,6 +126,8 @@ class DebouncePlugin(BasePlugin):
         self.session_events.clear()
         # 清理合并调度器（重发 pending + 取消 tick）
         await self.merge_scheduler.shutdown()
+        # 关闭聊天增强引擎
+        self.enhance.shutdown()
         logger.debug("[Debounce] All debounce tasks cancelled")
 
     # MP3 码率表（kbps）：MPEG1 Layer III / MPEG2&2.5 Layer III
@@ -144,6 +206,92 @@ class DebouncePlugin(BasePlugin):
         if duration <= 0:
             duration = self._estimate_record_duration(elem)
         return duration
+
+    # ========== 骚扰屏蔽 XML tag（戳/at/关键词/引用） ==========
+
+    @register.tag(name="poke_ignore", description="屏蔽戳一戳骚扰。输出 <poke_ignore>user|duration:N</poke_ignore> 屏蔽目标用户，<poke_ignore>all|duration:N</poke_ignore> 屏蔽所有用户，<poke_ignore>none</poke_ignore> 不屏蔽。duration 为秒，留空用默认值。")
+    async def handle_poke_ignore(self, value: str, **kwargs) -> list:
+        return self._apply_ignore_tag("poke", value)
+
+    @register.tag(name="at_ignore", description="屏蔽连续 at 骚扰。输出 <at_ignore>user|duration:N</at_ignore> 屏蔽目标用户，<at_ignore>all|duration:N</at_ignore> 屏蔽所有用户，<at_ignore>none</at_ignore> 不屏蔽。")
+    async def handle_at_ignore(self, value: str, **kwargs) -> list:
+        return self._apply_ignore_tag("at", value)
+
+    @register.tag(name="kw_ignore", description="屏蔽连续关键词唤醒骚扰。输出 <kw_ignore>user|duration:N</kw_ignore> 屏蔽目标用户，<kw_ignore>all|duration:N</kw_ignore> 屏蔽所有用户，<kw_ignore>none</kw_ignore> 不屏蔽。")
+    async def handle_kw_ignore(self, value: str, **kwargs) -> list:
+        return self._apply_ignore_tag("keyword", value)
+
+    @register.tag(name="reply_ignore", description="屏蔽引用唤醒骚扰。输出 <reply_ignore>user|duration:N</reply_ignore> 屏蔽目标用户，<reply_ignore>all|duration:N</reply_ignore> 屏蔽所有用户，<reply_ignore>none</reply_ignore> 不屏蔽。")
+    async def handle_reply_ignore(self, value: str, **kwargs) -> list:
+        return self._apply_ignore_tag("reply", value)
+
+    def _apply_ignore_tag(self, kind: str, value: str) -> list:
+        """解析骚扰屏蔽 tag 值并执行屏蔽。返回空列表（tag 不产生消息输出）。"""
+        try:
+            sid = self._last_ignore_sid
+        except AttributeError:
+            sid = None
+        if sid is None:
+            return []
+        result = self.enhance.harass.apply_ignore_from_tag(sid, kind, value)
+        if result:
+            logger.info(f"[Enhance] {kind} 屏蔽: {result}")
+        return []
+
+    @register.tool(
+        name="manage_ignore",
+        description="管理骚扰屏蔽：屏蔽某个用户/会话/某种唤醒方式，或提前解除屏蔽。bot 觉得被骚扰、或人设要求时调用。",
+        params={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["block", "unblock", "list"],
+                    "description": "block=屏蔽，unblock=解除屏蔽，list=查看当前屏蔽列表",
+                },
+                "target_type": {
+                    "type": "string",
+                    "enum": ["user", "session", "all"],
+                    "description": "屏蔽对象：user=某个用户，session=某个会话，all=全局（所有用户所有会话）",
+                },
+                "target_id": {
+                    "type": "string",
+                    "description": "目标 ID：target_type=user 时是用户 ID，=session 时是会话 ID，=all 时留空",
+                },
+                "block_type": {
+                    "type": "string",
+                    "enum": ["poke", "at", "keyword", "reply", "all"],
+                    "description": "屏蔽的唤醒方式：poke=戳一戳，at=连续at，keyword=连续关键词，reply=引用唤醒，all=全部",
+                    "default": "all",
+                },
+                "duration": {
+                    "type": "integer",
+                    "description": "屏蔽时长（秒）。留空用默认值；-1 表示永久",
+                    "default": 0,
+                },
+            },
+            "required": ["action", "target_type"],
+        },
+    )
+    async def manage_ignore(self, event, action: str, target_type: str, target_id: str = "",
+                            block_type: str = "all", duration: int = 0) -> str:
+        """bot 主动管理骚扰屏蔽。"""
+        try:
+            sid = str(event.session.sid)
+        except Exception:
+            sid = str(getattr(event, "sid", ""))
+        if action == "list":
+            return self.enhance.harass.list_ignored(sid)
+        if action == "unblock":
+            if target_type == "all":
+                return "请指定要解除的用户或会话"
+            return self.enhance.harass.unblock(sid, target_id, block_type)
+        # block
+        if target_type == "all":
+            return self.enhance.harass.apply_ignore("*", "*", block_type, duration)
+        if target_type == "session":
+            return self.enhance.harass.apply_ignore(sid, "*", block_type, duration)
+        return self.enhance.harass.apply_ignore(sid, target_id, block_type, duration)
 
     def _process_media(self, chain, is_mentioned: bool, is_private: bool = False):
         """处理消息链中的图片、动画表情、合并转发消息和语音"""
@@ -240,8 +388,14 @@ class DebouncePlugin(BasePlugin):
                 if self.group_proactive_chat and not event.is_group_message():
                     # 主动回复仅支持群聊
                     pass
-                elif self.group_proactive_chat and event.is_group_message():
-                    if random.random() < self.group_proactive_chat_probability:
+                elif self.group_proactive_chat and event.is_group_message() \
+                        and not self.enhance.dormant.in_dormant(self.enhance._now_hhmm()):
+                    # 存在感节流：概率 × k_prob（回少提高/回多降低）
+                    _psid = str(event.session.sid)
+                    prob = self.group_proactive_chat_probability * self.enhance.k_prob(_psid)
+                    prob_hit = random.random() < prob
+                    # 评分补正：评分不足概率命中作废；评分够概率未命中补触发
+                    if self.enhance.score_gate(_psid, prob_hit):
                         logger.info("[Chat] Triggered proactive chat")
                         event.flush()
             else:
@@ -249,6 +403,20 @@ class DebouncePlugin(BasePlugin):
             return
 
         sid = event.session.sid
+        # 记录最近会话（骚扰屏蔽 tag 处理器用）
+        self._last_ignore_sid = sid
+
+        # === 聊天增强引擎：存在感记录 + 骚扰检测 + 休眠判定 ===
+        self.enhance.on_im_message(event)
+        # 休眠期内起夜未命中：抑制触发（不推送 LLM）
+        if getattr(event, "_enhance_dormant_blocked", False):
+            event.discard()
+            return
+        # 强制通路超额抑制：占比超标且评分不足时，被唤醒也抑制（等评分补上）
+        if getattr(event, "_enhance_force_suppressed", False):
+            event.discard()
+            return
+
         event.buffer()
 
         buffer_len = self.ctx.message_processor.get_session_buffer_length(sid)
@@ -289,6 +457,8 @@ class DebouncePlugin(BasePlugin):
 
     @on.llm_request(priority=Priority.MEDIUM)
     async def inject_group_prompt(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
+        # 聊天增强引擎：注入合并通知（骚扰/唤醒/存在感状态）
+        self.enhance.on_llm_request(event, req)
         if not event.is_group_message():
             return
         if self.group_chat_prompt:
@@ -302,6 +472,13 @@ class DebouncePlugin(BasePlugin):
     @on.im_batch_message(priority=Priority.HIGH)
     async def on_queue_merge_batch(self, event: KiraMessageBatchEvent, *_):
         await self.merge_scheduler.on_batch_message(event)
+
+    @on.llm_response(priority=Priority.HIGH)
+    async def on_llm_response_enhance(self, event: KiraMessageBatchEvent, resp, *_):
+        # 聊天增强引擎：存在感记录 + 休眠维持期（仅最终文本回复时，工具中间步不记）
+        if getattr(resp, "tool_calls", None):
+            return
+        self.enhance.on_llm_response(event, resp)
 
     @on.llm_response(priority=Priority.HIGH)
     async def on_queue_merge_resp(self, event: KiraMessageBatchEvent, resp, *_):
