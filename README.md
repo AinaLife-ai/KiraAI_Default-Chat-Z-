@@ -1,8 +1,8 @@
-# KiraAI_Default-Chat-Z-默认消息处理插件优化版v1.6.0
+# KiraAI_Default-Chat-Z-默认消息处理插件优化版v1.6.1
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
-修改原版开启上下文收听后默认所有语音、图片、合并转发消息都识别的逻辑，减轻小水管模型的负担。当前版本 z 1.6.0，KiraAI2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
+修改原版开启上下文收听后默认所有语音、图片、合并转发消息都识别的逻辑，减轻小水管模型的负担。当前版本 z 1.6.1，KiraAI2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
 
 此修改版本默认开启只有明确唤醒（如at、关键词和引用回复时的消息中带有的）的语音、图片和转发消息才会被识别。如果关闭设置里的开关，则除了唤醒消息的图片外，其他按概率和数量选取，语音、转发消息全部阅读。
 
@@ -17,6 +17,8 @@
 - **媒体识别填充崩溃修复**（v1.5.8）：`_fill_text` / `_fill_chain` 的 `re.sub` 改为 `str.replace`，修复 VLM/STT 描述含反斜杠序列（如 Windows 路径 `\U`）时抛 `re.PatternError: bad escape` 导致 stage2 整批媒体识别崩溃的问题。
 
 ## v1.6.0 新增：存在感节流 + 骚扰感知化 + 休眠时段
+
+> ⚠️ **注意**：z 版**没有**持续对话 / 私聊主动 / 定时任务功能（用户明确要求不加）。以下三项能力作用于 z 版自身的「群聊主动发言」触发路径。
 
 ### 存在感节流（回少提高、回多降低）
 
@@ -44,12 +46,17 @@
 
 ## 🙏 致谢
 
-本插件的存在感节流（回少提高/回多降低）、休眠时段（起夜概率 + 维持期）等机制，在设计上参考并致敬了 **NoriEngine Chat**（[skyzhishui/kira-ai-plugin-noriengine-chat](https://github.com/skyzhishui/kira-ai-plugin-noriengine-chat)）的评分引擎思路——它率先用"存在感抑制 + 时段调度"让 KiraAI 在群聊中也有心跳包的感受，全局消息监听成为一种可能，融合版在此基础上把语义判断交还给 LLM，规则只做节流与状态管理。感谢 skyzhishui 的先行探索。
+本插件的存在感节流（回少提高/回多降低）、休眠时段（起夜概率 + 维持期）等机制，在设计上参考并致敬了 **NoriEngine Chat**（[skyzhishui/kira-ai-plugin-noriengine-chat](https://github.com/skyzhishui/kira-ai-plugin-noriengine-chat)）的评分引擎思路——它率先用"存在感抑制 + 时段调度"让 KiraAI 在群聊中也有了心跳包的感受，监听全局消息成为可能，融合版在此基础上把语义判断交还给 LLM，规则只做节流与状态管理。感谢 skyzhishui 的先行探索。
 
 <details>
 <summary>更新日志</summary>
 
-### v1.6.0
+### v1.6.1
+
+- 拉黑语义：屏蔽=该用户/会话所有消息不再进入（含戳一戳/at/关键词/引用/刷屏）；poke 单独屏蔽只挡戳一戳
+- 累计评分：用户消息 +1、bot 回复 -5，攒到阈值补触发一次后清零（必补）
+- tick 防抖：修复积压批次被单独发布不合并的问题
+- XML 合并：at_ignore/kw_ignore/reply_ignore 合并为 <ignore>（拉黑）
 
 **存在感节流**
 - 统计最近 N 条消息的 bot 发言占比，动态调节主动触发概率（k_prob 调节系数，回少提高/回多降低）
