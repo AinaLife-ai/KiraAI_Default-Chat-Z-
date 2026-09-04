@@ -80,7 +80,8 @@ class DebouncePlugin(BasePlugin):
             "presence_k_max": self.plugin_cfg.get("presence_k_max", 2.0),
             "idle_bonus_score": self.plugin_cfg.get("idle_bonus_score", 15),
             "force_suppress": self.plugin_cfg.get("force_suppress", False),
-            "score_gate_enabled": self.plugin_cfg.get("score_gate_enabled", False),
+            "score_gate_deny": self.plugin_cfg.get("score_gate_deny", False),
+            "score_gate_boost": self.plugin_cfg.get("score_gate_boost", False),
             "score_threshold": self.plugin_cfg.get("score_threshold", 60),
             "dormant_ranges": self.plugin_cfg.get("dormant_ranges", []),
             "dormant_wake_probability": self.plugin_cfg.get("dormant_wake_probability", 0.3),
@@ -471,7 +472,7 @@ class DebouncePlugin(BasePlugin):
                     prob = self.group_proactive_chat_probability * self.enhance.k_prob(_psid)
                     prob_hit = random.random() < prob
                     # 评分补正：评分不足概率命中作废；评分够概率未命中补触发
-                    if self.enhance.score_gate(_psid, prob_hit, prob=prob):
+                    if self.enhance.score_gate(_psid, prob_hit):
                         logger.info("[Chat] Triggered proactive chat")
                         event.flush()
             else:

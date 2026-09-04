@@ -290,12 +290,6 @@
     "default": false,
     "hint": "开启后 bot 发言占比过高时，被唤醒也降级为评分门槛"
   },
-  "score_gate_enabled": {
-    "type": "switch",
-    "name": "评分补正",
-    "default": false,
-    "hint": "开启后概率触发受评分补正：评分不足概率命中作废，评分够概率未命中补触发"
-  },
   "score_threshold": {
     "type": "float",
     "name": "评分阈值",
@@ -573,5 +567,17 @@
     "type": "float",
     "default": 1.5,
     "hint": "相对判定：静默时长超过该会话历史平均静默 × 倍数才算闲时（冷场）。0=不判闲时"
+  },
+  "score_gate_deny": {
+    "name": "门槛过滤（评分不足时阻止概率命中）",
+    "type": "switch",
+    "default": false,
+    "hint": "概率命中后累计分不足阈值则阻止触发，分数保留继续攒"
+  },
+  "score_gate_boost": {
+    "name": "补偿触发（评分达标时强制补发）",
+    "type": "switch",
+    "default": false,
+    "hint": "概率未命中但累计分达阈值则强制补偿触发，触发后清零"
   }
 }
