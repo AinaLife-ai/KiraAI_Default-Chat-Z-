@@ -42,7 +42,7 @@ class DebouncePlugin(BasePlugin):
         self.max_buffer_messages = _safe_int(bot_cfg.get("max_buffer_messages"), 3)
         self.max_unmentioned_messages = _safe_int(self.plugin_cfg.get("max_unmentioned_messages"), 5)
         self.receive_unmentioned = self.plugin_cfg.get("receive_unmentioned", False)
-        self.group_chat_prompt = self.plugin_cfg.get("group_chat_prompt", "")
+        self.group_chat_prompt = self.plugin_cfg.get("group_chat_prompt", '### 群聊环境说明\r\n\r\n当前为群聊环境，你需要聚焦于**和你有直接关联**或**你十分感兴趣**的消息，对于仅显示为[动画表情]或[图片]的消息不用互动，注意不要刷屏，可以选择不回复任何消息，直接输出<msg/>即可。\r\n\r\n## 消息感知\r\n\r\n你可能会同时收到多条消息，请根据上下文自主决策该回复哪些消息，注意不要刷屏，也可以选择不回复任何消息，直接输出<msg/>即可。\r\n你可以使用 <reasoning>reasoning_content</reasoning> 的标签格式来输出推理内容放在整个输出的最前面，用于推理应该回复哪些消息，回复语气，回复条数，消息分段情况等。\r\n<reasoning>标签和<msg>标签同级，**禁止**将次标签放到<msg>标签内。\r\n**符合以上规则的情况下**确保你想发的聊天消息在<text>标签内，不要遗漏。\r\n')
         self.group_proactive_chat = self.plugin_cfg.get("group_proactive_chat", False)
         self.group_proactive_chat_probability = _safe_float(self.plugin_cfg.get("group_proactive_chat_probability"), 0.1)
         self.proactive_scope_sessions = set(
