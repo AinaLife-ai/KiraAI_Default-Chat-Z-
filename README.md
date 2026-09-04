@@ -16,7 +16,7 @@
 - **热重载不丢消息**：终止时积压批次安全重发，消息不丢失
 - **原生多模态兼容**：native 图片模式下保留图片链直传框架，本插件只做音频 STT
 
-> ⚠️ z 版**无**持续对话 / 私聊主动 / 定时任务功能，以上作用于群聊主动发言路径。
+想要更多能力？推荐安装 **sustained-chat**（[KiraAI_sustained_chat_plugin](https://github.com/znq19/KiraAI_sustained_chat_plugin)），支持群聊持续对话、私聊主动、定时任务等完整主动社交能力。
 
 ## 安装
 
