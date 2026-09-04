@@ -139,8 +139,8 @@ class DebouncePlugin(BasePlugin):
         self.session_events.clear()
         # 清理合并调度器（重发 pending + 取消 tick）
         await self.merge_scheduler.shutdown()
-        # 关闭聊天增强引擎
-        self.enhance.shutdown()
+        # 关闭聊天增强引擎（await 等待 prune 任务退出）
+        await self.enhance.shutdown()
         logger.debug("[Debounce] All debounce tasks cancelled")
 
     # MP3 码率表（kbps）：MPEG1 Layer III / MPEG2&2.5 Layer III
@@ -413,7 +413,7 @@ class DebouncePlugin(BasePlugin):
             chain.message_list[idx] = Text("[图片]" if isinstance(elem, Image) else "[动画表情]")
 
     @on.im_message(priority=Priority.HIGH)
-    async def handle_msg(self, event: KiraMessageEvent):
+    async def handle_msg(self, event: KiraMessageEvent, *_):
         # 检查唤醒词（区分真 @ 与唤醒词命中：框架在循环前已标记真 @）
         _was_mentioned = bool(getattr(event, "is_mentioned", False))
         for m in event.message.chain:
@@ -424,6 +424,8 @@ class DebouncePlugin(BasePlugin):
                 break
         if _was_mentioned:
             event._wake_source = "at"
+
+        sid = event.session.sid
 
         if event.is_group_message():
             is_mentioned = event.is_mentioned
@@ -436,13 +438,25 @@ class DebouncePlugin(BasePlugin):
             self._process_media(event.message.chain, is_mentioned, is_private=True)
             # 私聊中不需要限制图片数量（因为一对一）
 
+        # === 聊天增强引擎：存在感记录 + 骚扰检测 + 休眠判定 ===
+        # 必须在未提及分支之前调用：未提及消息也要统计存在感/骚扰/休眠
+        self.enhance.on_im_message(event)
+        # 休眠期内起夜未命中：抑制触发（不推送 LLM）
+        if getattr(event, "_enhance_dormant_blocked", False):
+            event.discard()
+            return
+        # 强制通路超额抑制：占比超标且评分不足时，被唤醒也抑制（等评分补上）
+        if getattr(event, "_enhance_force_suppressed", False):
+            event.discard()
+            return
+
         if not event.is_mentioned:
             if self.receive_unmentioned:
                 buffer = self.ctx.get_buffer(str(event.session))
                 if buffer.get_length() >= self.max_unmentioned_messages:
                     buffer.pop(count=buffer.get_length()-self.max_unmentioned_messages+1)
                 event.buffer()
-                _psid = str(event.session.sid)
+                _psid = sid
                 if self.group_proactive_chat and not event.is_group_message():
                     # 主动回复仅支持群聊
                     pass
@@ -458,23 +472,6 @@ class DebouncePlugin(BasePlugin):
                         event.flush()
             else:
                 event.discard()
-            return
-
-        sid = event.session.sid
-        # 注意：不在此记录 _last_ignore_sid（旧实现）。ignore/wake_extend tag 是
-        # LLM 回复的输出，on_llm_response 已记录本次回复所属会话；handle_msg 里
-        # 记录会被任意新消息（含不触发 LLM 的围观消息）覆盖，造成 tag 作用到
-        # 错误会话的竞态。
-
-        # === 聊天增强引擎：存在感记录 + 骚扰检测 + 休眠判定 ===
-        self.enhance.on_im_message(event)
-        # 休眠期内起夜未命中：抑制触发（不推送 LLM）
-        if getattr(event, "_enhance_dormant_blocked", False):
-            event.discard()
-            return
-        # 强制通路超额抑制：占比超标且评分不足时，被唤醒也抑制（等评分补上）
-        if getattr(event, "_enhance_force_suppressed", False):
-            event.discard()
             return
 
         event.buffer()
