@@ -1,48 +1,28 @@
-# KiraAI_Default-Chat-Z-默认消息处理插件优化版v1.6.1
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.6.2
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
-修改原版开启上下文收听后默认所有语音、图片、合并转发消息都识别的逻辑，减轻小水管模型的负担。当前版本 z 1.6.1，KiraAI2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
+修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。v1.6.2，KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
 
-此修改版本默认开启只有明确唤醒（如at、关键词和引用回复时的消息中带有的）的语音、图片和转发消息才会被识别。如果关闭设置里的开关，则除了唤醒消息的图片外，其他按概率和数量选取，语音、转发消息全部阅读。
+默认仅唤醒消息（at/关键词/引用回复）中的语音、图片、转发才会识别。关闭对应开关后，非唤醒消息的图片按概率和数量选取，语音/转发全部阅读。
 
-## 新版特性：回复更快、更省 token
+## 亮点
 
-- **队列合并（积压处理）**：LLM 处理慢、消息爆发时，同一会话的积压批次自动合并为一次推送，上下文只发送一次、减少 LLM 调用次数——**更省 token**，更不刷屏。默认"不攒批"（当前批次一完成立即合并推送），软合并/超时合并阈值均可配置（`section_queue_merge`）。内置「批次卡死超时」兜底：当前批次超时无响应（LLM 挂起/异常崩溃）时强制推送积压批次，避免会话队列死锁（默认自动跟随 LLM 模型超时）。
-- **并行媒体识别**：图片 VLM 与语音 STT 并行预处理，积压批次排队期间媒体即识别完成，推送时零等待——**回复更快**。并发限制分三级（批次级/会话级/全局级）可配，兼容并行识图插件（`section_media_recognition`）；同一消息内的每个媒体最多识别一次，模型限流（429）时不会反复重试。
-- **媒体识别填充 file_path**（v1.5.9）：识别后的图片标识符带本地文件路径（`[Image #id: 描述, file_path: data/temp/xxx.jpg]`），对齐原版 `message_format_to_text` 行为，LLM 可直接用路径做图生图/上传等操作。
-- **热重载不丢消息**：插件终止/重载时积压批次会以全新批次安全重发，不再出现消息积压后永久无法处理的问题。
-- **原生多模态兼容**（v1.5.6）：KiraAI v2.31.0 新增 native 图片模式（`bot_config.capabilities.image_recognition.mode = "native"`）时，图片保留在消息链中由框架直传模型（官方压缩 + 持久化引用），本插件只做音频 STT、不再走 VLM 描述；默认 `vlm_description` 模式行为完全不变。
-- **最后一步带工具也即时收尾**（v1.5.5）：agent 在最大步数仍返回工具调用时（最后一步带工具，工具执行完即结束、无最终文本收尾），队列合并不再等「批次卡死超时」（默认 180s）才推送积压批次，而是立刻释放——消除工具循环收尾时最长 3 分钟的“哑巴”窗口。
-- **媒体识别填充崩溃修复**（v1.5.8）：`_fill_text` / `_fill_chain` 的 `re.sub` 改为 `str.replace`，修复 VLM/STT 描述含反斜杠序列（如 Windows 路径 `\U`）时抛 `re.PatternError: bad escape` 导致 stage2 整批媒体识别崩溃的问题。
+- **队列合并**：积压批次自动合并为一次推送，省 token、不刷屏，超时兜底防死锁
+- **并行媒体识别**：图片 VLM 与语音 STT 并行预处理，推送时零等待，三级并发控制可配
+- **存在感节流**：统计 bot 发言占比，回少提高概率、回多降低；累计评分门槛过滤（deny）+ 补偿触发（boost）独立控制
+- **骚扰感知化**：戳/连续 at/关键词/引用达到阈值 → System 通知 → bot 用 XML tag 决策屏蔽
+- **休眠时段**：可配休眠时间窗 + 起夜概率 + 维持期（续窗/一次性/次数上限）
+- **热重载不丢消息**：终止时积压批次安全重发，消息不丢失
+- **原生多模态兼容**：native 图片模式下保留图片链直传框架，本插件只做音频 STT
 
-## v1.6.0 新增：存在感节流 + 骚扰感知化 + 休眠时段
+> ⚠️ z 版**无**持续对话 / 私聊主动 / 定时任务功能，以上作用于群聊主动发言路径。
 
-> ⚠️ **注意**：z 版**没有**持续对话 / 私聊主动 / 定时任务功能（用户明确要求不加）。以下三项能力作用于 z 版自身的「群聊主动发言」触发路径。
+## 安装
 
-### 存在感节流（回少提高、回多降低）
+方式一：复制文件夹替换 `KiraAI-main\core\plugin\builtin_plugins\chat`
 
-- 统计最近 N 条消息的 bot 发言占比，动态调节主动触发概率：回少提高、回多降低（k_prob 调节系数，钳制在 `presence_k_min`~`presence_k_max`）
-- 评分补正：`score_gate_deny`（门槛过滤：评分不足时阻止概率命中，分继续攒）+ `score_gate_boost`（补偿触发：评分达标时强制补发，触发后清零），三条通路独立控制
-- 闲时加分（`idle_bonus_score`）：静默时长高于会话历史平均时加分
-- 强制通路超额抑制（`force_suppress`）：bot 发言占比过高时，被唤醒也降级为评分门槛
-
-### 骚扰感知化（戳/at/关键词/引用检测 + XML 决策屏蔽）
-
-- 戳一戳 / 连续 at / 连续关键词 / 引用唤醒 频率检测 → System 通知 → bot 用 XML tag 决策屏蔽
-- tag：`<poke_ignore>` / `<at_ignore>` / `<kw_ignore>` / `<reply_ignore>`，值 `user|duration:N` / `all|duration:N` / `none`
-- 默认屏蔽 180s，bot 可自设时长钳制到 300s；`manage_ignore` 工具可主动管理（block/unblock/list）
-
-### 休眠时段（起夜概率 + 维持期 + 主动续窗限制）
-
-- `dormant_ranges` 休眠时段 list，默认空 = 全天活跃；起夜概率 `dormant_wake_probability`
-- 维持期 `wake_keep_mode`（renew/once）+ `wake_keep_seconds` + `wake_max_rounds` + `wake_max_extensions` 主动续窗限制
-
-安装方法：根据个人喜好可采取两种方式——
-
-方式一：复制文件夹内容替换KiraAI-main\core\plugin\builtin_plugins\chat文件夹下内容，即直接替代原版Default Chat插件。
-
-方式二：复制文件夹到KiraAI-main\data\plugins路径下，但必须webui里关闭原版Default Chat插件或更旧版的Message Debounce插件以免冲突。
+方式二：复制到 `KiraAI-main\data\plugins`，需在 WebUI 关闭原版 Default Chat 或旧版 Message Debounce 插件
 
 ## 🙏 致谢
 
@@ -51,27 +31,21 @@
 <details>
 <summary>更新日志</summary>
 
-### v1.6.1
+### v1.6.2
 
-- 拉黑语义：屏蔽=该用户/会话所有消息不再进入（含戳一戳/at/关键词/引用/刷屏）；poke 单独屏蔽只挡戳一戳
-- 累计评分：用户消息 +1、bot 回复 -5，攒到阈值补触发一次后清零（必补）
+- 评分补正拆为 `score_gate_deny`（门槛过滤）+ `score_gate_boost`（补偿触发），三条通路独立控制
+
+### v1.6.0 ~ v1.6.1
+
+- 存在感节流 + 骚扰感知化 + 休眠时段完整能力
+- 拉黑语义：屏蔽=该用户/会话所有消息不再进入；poke 单独屏蔽只挡戳一戳
+- 累计评分：用户消息 +1、bot 回复 -5，攒到阈值补触发
 - tick 防抖：修复积压批次被单独发布不合并的问题
-- XML 合并：at_ignore/kw_ignore/reply_ignore 合并为 <ignore>（拉黑）
+- XML 合并：`at_ignore`/`kw_ignore`/`reply_ignore` 合并为 `<ignore>`（拉黑）
 
-**存在感节流**
-- 统计最近 N 条消息的 bot 发言占比，动态调节主动触发概率（k_prob 调节系数，回少提高/回多降低）
-- 评分补正（`score_gate_deny` + `score_gate_boost`）：门槛过滤与补偿触发独立控制，三条通路各自独立
-- 闲时加分（`idle_bonus_score`）；强制通路超额抑制（`force_suppress`）
+### v1.5.x
 
-**骚扰感知化**
-- 戳一戳 / 连续 at / 连续关键词 / 引用唤醒 频率检测 → System 通知 → bot 用 XML tag 决策屏蔽
-- tag：`<poke_ignore>` / `<at_ignore>` / `<kw_ignore>` / `<reply_ignore>`，值 `user|duration:N` / `all|duration:N` / `none`
-- 默认屏蔽 180s，bot 可自设时长钳制到 300s；`manage_ignore` 工具可主动管理
-
-**休眠时段**
-- `dormant_ranges` 休眠时段 list，默认空 = 全天活跃；起夜概率 `dormant_wake_probability`
-- 维持期 `wake_keep_mode`（renew/once）+ `wake_keep_seconds` + `wake_max_rounds` + `wake_max_extensions` 主动续窗限制
-
-> 注：z 版无持续对话 / 私聊主动 / 定时任务功能，以上能力仅作用于群聊主动发言触发路径。
+- 队列合并、并行媒体识别、热重载不丢消息、原生多模态兼容
+- 最后一步带工具即时收尾、媒体识别填充修复
 
 </details>
