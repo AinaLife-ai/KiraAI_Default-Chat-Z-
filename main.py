@@ -29,7 +29,7 @@ from core.provider import LLMRequest
 from core.chat.message_elements import Text, Image, Reply, Sticker, Forward, Record
 from queue_merge import BatchMergeScheduler
 from media_recognize import ParallelMediaRecognizer
-from chat_enhance import ChatEnhanceEngine
+from chat_enhance import ChatEnhanceEngine, _safe_int, _safe_float
 
 
 class DebouncePlugin(BasePlugin):
@@ -38,13 +38,13 @@ class DebouncePlugin(BasePlugin):
         self.session_events: dict[str, asyncio.Event] = {}
         self.session_tasks: dict[str, asyncio.Task] = {}
         bot_cfg = ctx.config["bot_config"].get("bot", {})
-        self.debounce_interval = float(bot_cfg.get("max_message_interval", 1.5))
-        self.max_buffer_messages = int(bot_cfg.get("max_buffer_messages", 3))
-        self.max_unmentioned_messages = int(self.plugin_cfg.get("max_unmentioned_messages", 5))
+        self.debounce_interval = _safe_float(bot_cfg.get("max_message_interval"), 1.5)
+        self.max_buffer_messages = _safe_int(bot_cfg.get("max_buffer_messages"), 3)
+        self.max_unmentioned_messages = _safe_int(self.plugin_cfg.get("max_unmentioned_messages"), 5)
         self.receive_unmentioned = self.plugin_cfg.get("receive_unmentioned", False)
         self.group_chat_prompt = self.plugin_cfg.get("group_chat_prompt", "")
         self.group_proactive_chat = self.plugin_cfg.get("group_proactive_chat", False)
-        self.group_proactive_chat_probability = self.plugin_cfg.get("group_proactive_chat_probability", 0.1)
+        self.group_proactive_chat_probability = _safe_float(self.plugin_cfg.get("group_proactive_chat_probability"), 0.1)
         self.proactive_scope_sessions = set(
             str(x) for x in (self.plugin_cfg.get("proactive_scope_sessions") or [])
         )
@@ -53,14 +53,14 @@ class DebouncePlugin(BasePlugin):
 
         # 图片/表情/转发消息处理配置
         self.image_recognition_only_on_mention = cfg.get("image_recognition_only_on_mention", True)
-        self.image_recognition_probability = float(cfg.get("image_recognition_probability", 1.0))
-        self.max_images_per_message = int(cfg.get("max_images_per_message", 3))
+        self.image_recognition_probability = _safe_float(cfg.get("image_recognition_probability"), 1.0)
+        self.max_images_per_message = _safe_int(cfg.get("max_images_per_message"), 3)
         self.forward_recognition_only_on_mention = cfg.get("forward_recognition_only_on_mention", True)
 
         # 语音消息处理配置
         self.voice_recognition_only_on_mention = cfg.get("voice_recognition_only_on_mention", True)
         self.voice_private_need_mention = cfg.get("voice_private_need_mention", True)  # 私聊是否需要@/回复
-        self.voice_max_duration = int(cfg.get("voice_max_duration", 0))
+        self.voice_max_duration = _safe_int(cfg.get("voice_max_duration"), 0)
 
         # 队列合并 / 积压处理（BatchMergeScheduler）
         self.merge_scheduler = BatchMergeScheduler(ctx, self.plugin_cfg, bot_cfg)
@@ -525,8 +525,9 @@ class DebouncePlugin(BasePlugin):
             self.enhance.dormant._awake_until.pop(sid, None)
             logger.debug(f"[Enhance] 休眠维持期达最大互动次数，结束: {sid}")
         # 记录本次 LLM 回复所属会话（ignore/wake_extend tag 处理器用）。
-        # 必须在最终文本回复时写：与 tag 解析之间无 await，原子，避免 handle_msg
-        # 期间其他会话消息覆盖导致 tag 作用到错误会话。
+        # 必须在最终文本回复时写：框架 tag 处理器无 event 上下文，_last_ignore_sid
+        # 是唯一通道。写入已把竞态窗口缩到最小（on_llm_response 返回后框架才解析
+        # XML 执行 tag，多会话并发回复时可能被覆盖，已知限制）。
         if sid:
             self._last_ignore_sid = sid
 
