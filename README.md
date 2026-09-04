@@ -1,8 +1,8 @@
-# KiraAI_Default-Chat-Z-默认消息处理插件优化版v1.5.9
+# KiraAI_Default-Chat-Z-默认消息处理插件优化版v1.6.0
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
-修改原版开启上下文收听后默认所有语音、图片、合并转发消息都识别的逻辑，减轻小水管模型的负担。当前版本 z 1.5.9，KiraAI2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
+修改原版开启上下文收听后默认所有语音、图片、合并转发消息都识别的逻辑，减轻小水管模型的负担。当前版本 z 1.6.0，KiraAI2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
 
 此修改版本默认开启只有明确唤醒（如at、关键词和引用回复时的消息中带有的）的语音、图片和转发消息才会被识别。如果关闭设置里的开关，则除了唤醒消息的图片外，其他按概率和数量选取，语音、转发消息全部阅读。
 
@@ -16,8 +16,57 @@
 - **最后一步带工具也即时收尾**（v1.5.5）：agent 在最大步数仍返回工具调用时（最后一步带工具，工具执行完即结束、无最终文本收尾），队列合并不再等「批次卡死超时」（默认 180s）才推送积压批次，而是立刻释放——消除工具循环收尾时最长 3 分钟的“哑巴”窗口。
 - **媒体识别填充崩溃修复**（v1.5.8）：`_fill_text` / `_fill_chain` 的 `re.sub` 改为 `str.replace`，修复 VLM/STT 描述含反斜杠序列（如 Windows 路径 `\U`）时抛 `re.PatternError: bad escape` 导致 stage2 整批媒体识别崩溃的问题。
 
+## v1.6.0 新增：存在感节流 + 骚扰感知化 + 休眠时段
+
+> ⚠️ **注意**：z 版**没有**持续对话 / 私聊主动 / 定时任务功能（用户明确要求不加）。以下三项能力作用于 z 版自身的「群聊主动发言」触发路径。
+
+### 存在感节流（回少提高、回多降低）
+
+- 统计最近 N 条消息的 bot 发言占比，动态调节主动触发概率：回少提高、回多降低（k_prob 调节系数，钳制在 `presence_k_min`~`presence_k_max`）
+- 评分补正（`score_gate_enabled`）：评分不足时概率命中作废（攒分），评分够时概率未命中补触发
+- 闲时加分（`idle_bonus_score`）：静默时长高于会话历史平均时加分
+- 强制通路超额抑制（`force_suppress`）：bot 发言占比过高时，被唤醒也降级为评分门槛
+
+### 骚扰感知化（戳/at/关键词/引用检测 + XML 决策屏蔽）
+
+- 戳一戳 / 连续 at / 连续关键词 / 引用唤醒 频率检测 → System 通知 → bot 用 XML tag 决策屏蔽
+- tag：`<poke_ignore>` / `<at_ignore>` / `<kw_ignore>` / `<reply_ignore>`，值 `user|duration:N` / `all|duration:N` / `none`
+- 默认屏蔽 180s，bot 可自设时长钳制到 300s；`manage_ignore` 工具可主动管理（block/unblock/list）
+
+### 休眠时段（起夜概率 + 维持期 + 主动续窗限制）
+
+- `dormant_ranges` 休眠时段 list，默认空 = 全天活跃；起夜概率 `dormant_wake_probability`
+- 维持期 `wake_keep_mode`（renew/once）+ `wake_keep_seconds` + `wake_max_rounds` + `wake_max_extensions` 主动续窗限制
+
 安装方法：根据个人喜好可采取两种方式——
 
 方式一：复制文件夹内容替换KiraAI-main\core\plugin\builtin_plugins\chat文件夹下内容，即直接替代原版Default Chat插件。
 
 方式二：复制文件夹到KiraAI-main\data\plugins路径下，但必须webui里关闭原版Default Chat插件或更旧版的Message Debounce插件以免冲突。
+
+## 🙏 致谢
+
+本插件的存在感节流（回少提高/回多降低）、休眠时段（起夜概率 + 维持期）等机制，在设计上参考并致敬了 **NoriEngine Chat**（[skyzhishui/kira-ai-plugin-noriengine-chat](https://github.com/skyzhishui/kira-ai-plugin-noriengine-chat)）的评分引擎思路——它率先用"存在感抑制 + 时段调度"让 AI 在群聊中得体地主动，融合版在此基础上把语义判断交还给 LLM，规则只做节流与状态管理。感谢 skyzhishui 的先行探索。
+
+<details>
+<summary>更新日志</summary>
+
+### v1.6.0
+
+**存在感节流**
+- 统计最近 N 条消息的 bot 发言占比，动态调节主动触发概率（k_prob 调节系数，回少提高/回多降低）
+- 评分补正（`score_gate_enabled`）：评分不足概率命中作废（攒分），评分够概率未命中补触发
+- 闲时加分（`idle_bonus_score`）；强制通路超额抑制（`force_suppress`）
+
+**骚扰感知化**
+- 戳一戳 / 连续 at / 连续关键词 / 引用唤醒 频率检测 → System 通知 → bot 用 XML tag 决策屏蔽
+- tag：`<poke_ignore>` / `<at_ignore>` / `<kw_ignore>` / `<reply_ignore>`，值 `user|duration:N` / `all|duration:N` / `none`
+- 默认屏蔽 180s，bot 可自设时长钳制到 300s；`manage_ignore` 工具可主动管理
+
+**休眠时段**
+- `dormant_ranges` 休眠时段 list，默认空 = 全天活跃；起夜概率 `dormant_wake_probability`
+- 维持期 `wake_keep_mode`（renew/once）+ `wake_keep_seconds` + `wake_max_rounds` + `wake_max_extensions` 主动续窗限制
+
+> 注：z 版无持续对话 / 私聊主动 / 定时任务功能，以上能力仅作用于群聊主动发言触发路径。
+
+</details>
