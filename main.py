@@ -45,6 +45,9 @@ class DebouncePlugin(BasePlugin):
         self.group_chat_prompt = self.plugin_cfg.get("group_chat_prompt", "")
         self.group_proactive_chat = self.plugin_cfg.get("group_proactive_chat", False)
         self.group_proactive_chat_probability = self.plugin_cfg.get("group_proactive_chat_probability", 0.1)
+        self.proactive_scope_sessions = set(
+            str(x) for x in (self.plugin_cfg.get("proactive_scope_sessions") or [])
+        )
 
         self.waking_words = cfg.get("waking_words", [])
 
@@ -82,6 +85,12 @@ class DebouncePlugin(BasePlugin):
             "wake_keep_seconds": self.plugin_cfg.get("wake_keep_seconds", 300),
             "wake_max_rounds": self.plugin_cfg.get("wake_max_rounds", -1),
             "wake_max_extensions": self.plugin_cfg.get("wake_max_extensions", -1),
+            "harass_scope_sessions": self.plugin_cfg.get("harass_scope_sessions", []),
+            "harass_whitelist_users": self.plugin_cfg.get("harass_whitelist_users", []),
+            "harass_whitelist_sessions": self.plugin_cfg.get("harass_whitelist_sessions", []),
+            "dormant_scope_sessions": self.plugin_cfg.get("dormant_scope_sessions", []),
+            "dormant_whitelist_users": self.plugin_cfg.get("dormant_whitelist_users", []),
+            "dormant_whitelist_sessions": self.plugin_cfg.get("dormant_whitelist_sessions", []),
         }
         for _kind in ("poke", "at", "keyword", "reply"):
             _enhance_cfg[f"section_{_kind}"] = {
@@ -307,6 +316,12 @@ class DebouncePlugin(BasePlugin):
             return self.enhance.harass.apply_ignore(sid, "*", block_type, duration)
         return self.enhance.harass.apply_ignore(sid, target_id, block_type, duration)
 
+    def _is_proactive_allowed(self, sid: str) -> bool:
+        """群聊积极概率作用域检查：scope 非空时仅这些会话生效（空=全部）。"""
+        if not self.proactive_scope_sessions:
+            return True
+        return sid in self.proactive_scope_sessions
+
     def _process_media(self, chain, is_mentioned: bool, is_private: bool = False):
         """处理消息链中的图片、动画表情、合并转发消息和语音"""
         for i, elem in enumerate(chain.message_list):
@@ -404,13 +419,14 @@ class DebouncePlugin(BasePlugin):
                 if buffer.get_length() >= self.max_unmentioned_messages:
                     buffer.pop(count=buffer.get_length()-self.max_unmentioned_messages+1)
                 event.buffer()
+                _psid = str(event.session.sid)
                 if self.group_proactive_chat and not event.is_group_message():
                     # 主动回复仅支持群聊
                     pass
                 elif self.group_proactive_chat and event.is_group_message() \
-                        and not self.enhance.dormant.in_dormant(self.enhance._now_hhmm()):
+                        and not self.enhance.dormant.in_dormant(self.enhance._now_hhmm(), _psid) \
+                        and self._is_proactive_allowed(_psid):
                     # 存在感节流：概率 × k_prob（回少提高/回多降低）
-                    _psid = str(event.session.sid)
                     prob = self.group_proactive_chat_probability * self.enhance.k_prob(_psid)
                     prob_hit = random.random() < prob
                     # 评分补正：评分不足概率命中作废；评分够概率未命中补触发
