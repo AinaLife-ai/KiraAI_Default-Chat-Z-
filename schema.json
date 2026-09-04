@@ -154,6 +154,12 @@
         "type": "switch",
         "default": false,
         "hint": "开启后打印队列合并调试日志（放行/拦截/软合并/超时合并/拆批等决策），便于排查"
+      },
+      "merge_window_seconds": {
+        "type": "float",
+        "name": "合并窗口顺延（秒）",
+        "default": 0,
+        "hint": "最后一条消息到达后 N 秒无新消息才合并推送（防抖重置：期间新消息到达窗口重置）。0=自动：取框架最大消息合并间隔（bot_config.bot.max_message_interval，默认 2s）"
       }
     }
   },
