@@ -537,5 +537,11 @@
     "name": "休眠白名单（会话）",
     "default": [],
     "hint": "这些会话不受休眠限制，填了不生效。格式如 qq:gm:123456"
+  },
+  "enable_manage_ignore": {
+    "type": "switch",
+    "name": "主动屏蔽工具（manage_ignore）",
+    "default": true,
+    "hint": "关闭后 bot 不再能主动调用屏蔽工具（仍可响应 XML tag 屏蔽），默认开启"
   }
 }

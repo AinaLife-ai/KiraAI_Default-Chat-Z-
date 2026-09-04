@@ -48,6 +48,8 @@ class DebouncePlugin(BasePlugin):
         self.proactive_scope_sessions = set(
             str(x) for x in (self.plugin_cfg.get("proactive_scope_sessions") or [])
         )
+        # 主动屏蔽工具开关（manage_ignore）：关闭后 bot 不再能主动屏蔽骚扰
+        self.enable_manage_ignore = self.plugin_cfg.get("enable_manage_ignore", True)
 
         self.waking_words = cfg.get("waking_words", [])
 
@@ -324,6 +326,25 @@ class DebouncePlugin(BasePlugin):
             return True
         return sid in self.proactive_scope_sessions
 
+    def _filter_tools(self, tool_set, blacklist, mode: str):
+        """按黑名单过滤 ToolSet（与 s 版一致：BaseTool 实例，tool.name + remove）。"""
+        if not blacklist or not tool_set or not getattr(tool_set, "tools", None):
+            return
+        to_remove: list[str] = []
+        for tool in list(tool_set.tools):
+            name = getattr(tool, "name", None) or ""
+            if not name:
+                continue
+            if mode == "partial":
+                if any(kw in name for kw in blacklist):
+                    to_remove.append(name)
+            else:
+                if name in blacklist:
+                    to_remove.append(name)
+        if to_remove:
+            tool_set.remove(*to_remove)
+            logger.debug(f"[Enhance] 已从 tool_set 移除工具: {to_remove}")
+
     def _process_media(self, chain, is_mentioned: bool, is_private: bool = False):
         """处理消息链中的图片、动画表情、合并转发消息和语音"""
         for i, elem in enumerate(chain.message_list):
@@ -498,6 +519,10 @@ class DebouncePlugin(BasePlugin):
     async def inject_group_prompt(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
         # 聊天增强引擎：注入合并通知（骚扰/唤醒/存在感状态）
         self.enhance.on_llm_request(event, req)
+        # 主动屏蔽工具开关：关闭时从 tool_set 移除 manage_ignore
+        if not self.enable_manage_ignore:
+            self._filter_tools(req.tool_set, ["manage_ignore"], "exact")
+            logger.debug("[Enhance] manage_ignore 工具已禁用（enable_manage_ignore=false）")
         if not event.is_group_message():
             return
         if self.group_chat_prompt:
