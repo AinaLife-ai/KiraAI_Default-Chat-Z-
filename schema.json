@@ -567,5 +567,11 @@
     "type": "float",
     "default": 100,
     "hint": "累计分上限，防止长时间无 bot 回复时分数无限累积"
+  },
+  "idle_bonus_ratio": {
+    "name": "闲时判定倍数",
+    "type": "float",
+    "default": 1.5,
+    "hint": "相对判定：静默时长超过该会话历史平均静默 × 倍数才算闲时（冷场）。0=不判闲时"
   }
 }
