@@ -41,6 +41,14 @@ class DebouncePlugin(BasePlugin):
         bot_cfg = ctx.config["bot_config"].get("bot", {})
         self.debounce_interval = _safe_float(bot_cfg.get("max_message_interval"), 1.5)
         self.max_buffer_messages = _safe_int(bot_cfg.get("max_buffer_messages"), 3)
+        # 消息合并间隔顺延
+        _mws = self.plugin_cfg.get("merge_window_seconds", -1)
+        if _mws is None or _mws == -1:
+            self.merge_window_seconds = self.debounce_interval
+        elif _mws == 0:
+            self.merge_window_seconds = 0
+        else:
+            self.merge_window_seconds = float(_mws)
         self.max_unmentioned_messages = _safe_int(self.plugin_cfg.get("max_unmentioned_messages"), 5)
         self.receive_unmentioned = self.plugin_cfg.get("receive_unmentioned", False)
         self.group_chat_prompt = self.plugin_cfg.get("group_chat_prompt", '### 群聊环境说明\r\n\r\n当前为群聊环境，你需要聚焦于**和你有直接关联**或**你十分感兴趣**的消息，对于仅显示为[动画表情]或[图片]的消息不用互动，注意不要刷屏，可以选择不回复任何消息，直接输出<msg/>即可。\r\n\r\n## 消息感知\r\n\r\n你可能会同时收到多条消息，请根据上下文自主决策该回复哪些消息，注意不要刷屏，也可以选择不回复任何消息，直接输出<msg/>即可。\r\n你可以使用 <reasoning>reasoning_content</reasoning> 的标签格式来输出推理内容放在整个输出的最前面，用于推理应该回复哪些消息，回复语气，回复条数，消息分段情况等。\r\n<reasoning>标签和<msg>标签同级，**禁止**将次标签放到<msg>标签内。\r\n**符合以上规则的情况下**确保你想发的聊天消息在<text>标签内，不要遗漏。\r\n')
@@ -522,10 +530,22 @@ class DebouncePlugin(BasePlugin):
             while True:
                 await event.wait()
                 event.clear()
-                try:
-                    await asyncio.sleep(self.debounce_interval)
-                except asyncio.CancelledError:
-                    break
+                if self.merge_window_seconds > 0:
+                    # 消息合并间隔顺延：新消息到达时重置计时器
+                    remaining = self.merge_window_seconds
+                    while remaining > 0:
+                        try:
+                            await asyncio.wait_for(event.wait(), timeout=remaining)
+                            event.clear()
+                            remaining = self.merge_window_seconds
+                        except asyncio.TimeoutError:
+                            break
+                else:
+                    # 0 = 不启用顺延，固定间隔 flush（框架原行为）
+                    try:
+                        await asyncio.sleep(self.debounce_interval)
+                    except asyncio.CancelledError:
+                        break
                 if event.is_set() and not self.receive_unmentioned:
                     continue
                 buffer_len = self.ctx.message_processor.get_session_buffer_length(sid)
