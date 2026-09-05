@@ -122,6 +122,12 @@ class DebouncePlugin(BasePlugin):
         self._migrate_flat_config(cfg)
         self.session_events: dict[str, asyncio.Event] = {}
         self.session_tasks: dict[str, asyncio.Task] = {}
+        # 消息批次状态（"前文 + 批次"模型）：
+        # - batch_started[sid]: 会话是否已出现首个唤醒消息（批次已开始）
+        # - batch_count[sid]: 从批次首个唤醒消息起进入 buffer 的消息数（含唤醒本身）
+        #   达到 max_buffer_messages 即满即推；批次内唤醒/普通消息一视同仁（不重置）
+        self.batch_started: dict[str, bool] = {}
+        self.batch_count: dict[str, int] = {}
         bot_cfg = ctx.config["bot_config"].get("bot", {})
         self.debounce_interval = _safe_float(bot_cfg.get("max_message_interval"), 1.5)
         self.max_buffer_messages = _safe_int(bot_cfg.get("max_buffer_messages"), 3)
@@ -604,23 +610,24 @@ class DebouncePlugin(BasePlugin):
 
         if not event.is_mentioned:
             if self.receive_unmentioned:
-                # 满即推优先（max_buffer_messages 总量控制，所有消息到达都检查）：
-                # 必须【先】于裁剪判断——裁剪会把 buffer 压回 max_unmentioned 条，
-                # 若先裁剪则满即推永远不触发（与原版 bug 相同：消息滞留/被裁剪弹掉）。
-                # 注意：event.buffer() 只是设置策略，本条消息实际入 buffer 在框架执行策略后，
-                # 故用 _blen + 1 >= max_buffer_messages（含本条）判断。
-                if self.max_buffer_messages > 0:
-                    _blen = self.ctx.message_processor.get_session_buffer_length(sid)
-                    if _blen + 1 >= self.max_buffer_messages:
-                        event.flush()
-                        return
-                # 未满即推才裁剪（维持非唤醒消息上限，弹最老的"唤醒之外额外上文"）
-                buffer = self.ctx.get_buffer(str(event.session))
-                if buffer.get_length() >= self.max_unmentioned_messages:
-                    buffer.pop(count=buffer.get_length()-self.max_unmentioned_messages+1)
+                _batch_on = self.batch_started.get(sid, False)
+                if not _batch_on:
+                    # 前文阶段（批次未开始）：维持前文上限，弹最老前文
+                    buffer = self.ctx.get_buffer(str(event.session))
+                    if buffer.get_length() >= self.max_unmentioned_messages:
+                        buffer.pop(count=buffer.get_length()-self.max_unmentioned_messages+1)
+                # 批次已开始：不裁剪（批次内消息只进不出，直到满即推/顺延到点）
                 event.buffer()
+                if _batch_on:
+                    # 批次计数 +1，满即推检查
+                    self.batch_count[sid] = self.batch_count.get(sid, 0) + 1
+                    if self.max_buffer_messages > 0 and self.batch_count[sid] >= self.max_buffer_messages:
+                        event.flush()
+                        # 批次已满即推，清理批次状态（下一批从 0 开始）
+                        self.batch_started.pop(sid, None)
+                        self.batch_count.pop(sid, None)
+                        return
                 # 顺延进行中：非唤醒消息也重置计时器（最后一条消息到达后 N 秒无新消息才 flush）
-                # 仅在已有顺延任务时 set——不主动启动（非唤醒不触发开窗）
                 if sid in self.session_events and sid in self.session_tasks:
                     self.session_events[sid].set()
                 _psid = sid
@@ -643,11 +650,21 @@ class DebouncePlugin(BasePlugin):
                 event.discard()
             return
 
+        # === 唤醒消息：启动/延续批次 ===
         event.buffer()
-
-        buffer_len = self.ctx.message_processor.get_session_buffer_length(sid)
-        if buffer_len + 1 >= self.max_buffer_messages:
+        if not self.batch_started.get(sid, False):
+            # 首个唤醒消息：批次开始，计数从 1（含唤醒本身）
+            self.batch_started[sid] = True
+            self.batch_count[sid] = 1
+        else:
+            # 批次中的唤醒消息：只当普通消息计数，不重置批次
+            self.batch_count[sid] = self.batch_count.get(sid, 0) + 1
+        # 满即推：批次计数达到 max_buffer_messages
+        if self.max_buffer_messages > 0 and self.batch_count[sid] >= self.max_buffer_messages:
             event.flush()
+            # 批次已满即推，清理批次状态（下一批从 0 开始）
+            self.batch_started.pop(sid, None)
+            self.batch_count.pop(sid, None)
             return
 
         if sid not in self.session_events:
@@ -676,15 +693,13 @@ class DebouncePlugin(BasePlugin):
                             remaining = self.merge_window_seconds
                         except asyncio.TimeoutError:
                             break
-                        # 容量安全阀：顺延等待中 buffer 达到最大缓冲消息数，提前结束顺延（不丢消息）
-                        if self.max_buffer_messages > 0:
-                            _blen = self.ctx.message_processor.get_session_buffer_length(sid)
-                            if _blen >= self.max_buffer_messages:
-                                if self._merge_debug:
-                                    logger.info(
-                                        f"[Debounce] 顺延提前结束（buffer {_blen} 条 ≥ 上限 {self.max_buffer_messages}）: {sid}"
-                                    )
-                                break
+                        # 满即推安全阀：顺延等待中批次计数达到 max_buffer_messages，提前结束顺延
+                        if self.max_buffer_messages > 0 and self.batch_count.get(sid, 0) >= self.max_buffer_messages:
+                            if self._merge_debug:
+                                logger.info(
+                                    f"[Debounce] 顺延提前结束（批次 {self.batch_count.get(sid, 0)} 条 ≥ 上限 {self.max_buffer_messages}）: {sid}"
+                                )
+                            break
                 else:
                     # 0 = 不启用顺延，固定间隔 flush（框架原行为）
                     try:
@@ -702,11 +717,16 @@ class DebouncePlugin(BasePlugin):
                     await self.ctx.message_processor.flush_session_messages(sid)
                 except Exception:
                     logger.exception(f"[Debounce] Error flushing session {sid}")
+                # 批次已随 flush 送出，清理批次状态（下一批从 0 开始）
+                self.batch_started.pop(sid, None)
+                self.batch_count.pop(sid, None)
         except asyncio.CancelledError:
             logger.debug(f"[Debounce] Debounce loop for session {sid} cancelled")
         finally:
             self.session_tasks.pop(sid, None)
             self.session_events.pop(sid, None)
+            self.batch_started.pop(sid, None)
+            self.batch_count.pop(sid, None)
 
     @on.llm_request(priority=Priority.MEDIUM)
     async def inject_group_prompt(self, event: KiraMessageBatchEvent, req: LLMRequest, *_):
