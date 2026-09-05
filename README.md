@@ -1,8 +1,8 @@
-# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.7.0
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.7.1
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
-修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。v1.7.0，KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
+修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。v1.7.1，KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
 
 默认仅唤醒消息（at/关键词/引用回复）中的语音、图片、转发才会识别。关闭对应开关后，非唤醒消息的图片按概率和数量选取，语音/转发全部阅读。
 
@@ -30,6 +30,10 @@
 
 <details>
 <summary>更新日志</summary>
+
+### v1.7.1
+
+- **修复非唤醒消息不重置顺延**：之前 merge_window_seconds 顺延只被唤醒消息重置，非唤醒消息（receive_unmentioned）到达后计时器不重置——导致顺延形同"首条唤醒消息后固定 N 秒"。现在非唤醒消息也会重置计时器，真正实现"最后一条消息到达后 N 秒无新消息才 flush"
 
 ### v1.7.0
 
