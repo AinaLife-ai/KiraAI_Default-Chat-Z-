@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import os
 import random
 import sys
@@ -102,8 +103,13 @@ class DebouncePlugin(BasePlugin):
                 from core.utils.path_utils import get_config_path
                 _cfg_path = get_config_path() / "plugins" / "default-chat（z）.json"
                 if _cfg_path.parent.exists():
-                    with open(_cfg_path, "w", encoding="utf-8") as f:
-                        json.dump(cfg, f, indent=4, ensure_ascii=False)
+                    # 安全写入：先序列化生成字符串（不碰原文件），成功后再原子替换，
+                    # 任何异常都保证原配置文件不被清空（旧实现 open("w") 先截断再 dump，失败即清空）
+                    _content = json.dumps(cfg, indent=4, ensure_ascii=False)
+                    _tmp = _cfg_path.with_suffix(".json.tmp")
+                    with open(_tmp, "w", encoding="utf-8") as f:
+                        f.write(_content)
+                    _tmp.replace(_cfg_path)
                     logger.info(f"[Debounce] 迁移配置已写回: {_cfg_path}")
             except Exception as e:
                 logger.warning(f"[Debounce] 迁移写回配置文件失败（不影响本次运行）: {e}")
@@ -598,10 +604,37 @@ class DebouncePlugin(BasePlugin):
 
         if not event.is_mentioned:
             if self.receive_unmentioned:
-                buffer = self.ctx.get_buffer(str(event.session))
-                if buffer.get_length() >= self.max_unmentioned_messages:
-                    buffer.pop(count=buffer.get_length()-self.max_unmentioned_messages+1)
+                _buffer = self.ctx.get_buffer(str(event.session))
+                # 裁剪只弹"非唤醒"消息（唤醒消息是触发 LLM 的核心，绝不能被裁剪丢弃）
+                if _buffer.get_length() >= self.max_unmentioned_messages:
+                    _keep = self.max_unmentioned_messages
+                    _dropped = 0
+                    while True:
+                        _evts = getattr(_buffer, "buffer", None)
+                        if not _evts:
+                            break
+                        _non_cnt = sum(1 for e in _evts if not getattr(e, "is_mentioned", False))
+                        if _non_cnt <= _keep:
+                            break
+                        _idx = next((i for i, e in enumerate(_evts) if not getattr(e, "is_mentioned", False)), -1)
+                        if _idx < 0:
+                            break
+                        del _evts[_idx]
+                        _dropped += 1
+                    if _dropped:
+                        logger.debug(
+                            f"[Debounce] 非唤醒消息裁剪 {_dropped} 条（唤醒消息不受影响）: {sid}"
+                        )
                 event.buffer()
+                # 容量安全阀：buffer 达到最大缓冲消息数时立即 flush（框架不自动 flush，
+                # 非唤醒消息大量涌入时若只重置顺延会导致消息滞留/被裁剪丢弃）
+                # 注意：event.buffer() 只是设置策略，本条消息实际入 buffer 在框架执行策略后，
+                # 故用 _blen + 1 >= max_buffer_messages（含本条）判断
+                if self.max_buffer_messages > 0:
+                    _blen = self.ctx.message_processor.get_session_buffer_length(sid)
+                    if _blen + 1 >= self.max_buffer_messages:
+                        event.flush()
+                        return
                 # 顺延进行中：非唤醒消息也重置计时器（最后一条消息到达后 N 秒无新消息才 flush）
                 # 仅在已有顺延任务时 set——不主动启动（非唤醒不触发开窗）
                 if sid in self.session_events and sid in self.session_tasks:
@@ -659,6 +692,15 @@ class DebouncePlugin(BasePlugin):
                             remaining = self.merge_window_seconds
                         except asyncio.TimeoutError:
                             break
+                        # 容量安全阀：顺延等待中 buffer 达到最大缓冲消息数，提前结束顺延（不丢消息）
+                        if self.max_buffer_messages > 0:
+                            _blen = self.ctx.message_processor.get_session_buffer_length(sid)
+                            if _blen >= self.max_buffer_messages:
+                                if self._merge_debug:
+                                    logger.info(
+                                        f"[Debounce] 顺延提前结束（buffer {_blen} 条 ≥ 上限 {self.max_buffer_messages}）: {sid}"
+                                    )
+                                break
                 else:
                     # 0 = 不启用顺延，固定间隔 flush（框架原行为）
                     try:
