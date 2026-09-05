@@ -246,6 +246,7 @@ class DebouncePlugin(BasePlugin):
             "dm_user_msgs_threshold": _sec("section_thresholds", "dm_user_msgs_threshold", 10),
             "dm_session_msgs_window_seconds": _sec("section_thresholds", "dm_session_msgs_window_seconds", 60),
             "dm_session_msgs_threshold": _sec("section_thresholds", "dm_session_msgs_threshold", 20),
+            "extra_default_duration": _sec("section_thresholds", "extra_default_duration", 180),
         }
         for _kind in ("poke", "at", "keyword", "reply"):
             _pk = _sec(f"section_{_kind}", "enabled", False)
