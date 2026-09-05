@@ -34,45 +34,128 @@ from chat_enhance import ChatEnhanceEngine, _safe_int, _safe_float
 
 
 class DebouncePlugin(BasePlugin):
+    def _migrate_flat_config(self, cfg: dict):
+        """首次更新自动迁移：把旧版扁平键迁移为新版分组（section）结构。
+
+        v1.7.0 起 z 版配置项从扁平改为分组模式（与 s 版一致）。老用户升级后，
+        其配置文件里仍是扁平键（如 presence_window_size），且新 section 已被
+        框架填入默认值。此函数检测到旧扁平键时，将其值搬入对应 section，
+        删除旧的扁平键，写回配置文件。通过 cfg 内的 config_version 标记确保只迁一次。
+        """
+        if cfg.get("config_version", 1) >= 2:
+            return
+        # 扁平键 → section 的映射（与 schema.json 分组一致）
+        _section_map = {
+            "section_basic": ["waking_words", "receive_unmentioned", "max_unmentioned_messages",
+                              "merge_window_seconds", "group_chat_prompt", "group_proactive_chat",
+                              "group_proactive_chat_probability", "proactive_scope_sessions",
+                              "enable_manage_ignore", "proactive_score_gate_deny",
+                              "proactive_score_gate_boost", "proactive_k_prob_enabled"],
+            "section_media": ["image_recognition_only_on_mention", "image_recognition_probability",
+                              "max_images_per_message", "forward_recognition_only_on_mention",
+                              "voice_recognition_only_on_mention", "voice_private_need_mention",
+                              "voice_max_duration"],
+            "section_presence": ["presence_window_size", "presence_decay_minutes", "presence_target_ratio",
+                                 "presence_k_min", "presence_k_max", "idle_bonus_score", "force_suppress",
+                                 "score_threshold", "score_increment", "score_penalty", "score_cap",
+                                 "idle_bonus_ratio"],
+            "section_dm_presence": ["dm_presence_enabled", "dm_presence_window_size", "dm_presence_target_ratio",
+                                    "dm_presence_k_min", "dm_presence_k_max", "dm_score_threshold",
+                                    "dm_score_increment", "dm_score_penalty", "dm_score_cap",
+                                    "dm_idle_bonus_score", "dm_idle_bonus_ratio"],
+            "section_poke": ["poke_enabled", "poke_window_seconds", "poke_threshold", "poke_default_duration",
+                             "poke_allow_bot_duration", "poke_max_duration", "poke_scope"],
+            "section_at": ["at_enabled", "at_window_seconds", "at_threshold", "at_default_duration",
+                           "at_allow_bot_duration", "at_max_duration", "at_scope"],
+            "section_keyword": ["keyword_enabled", "keyword_window_seconds", "keyword_threshold",
+                                "keyword_default_duration", "keyword_allow_bot_duration",
+                                "keyword_max_duration", "keyword_scope"],
+            "section_reply": ["reply_enabled", "reply_window_seconds", "reply_threshold",
+                              "reply_default_duration", "reply_allow_bot_duration", "reply_max_duration",
+                              "reply_scope"],
+            "section_dormant": ["dormant_ranges", "dormant_wake_probability", "wake_keep_mode",
+                                "wake_keep_seconds", "wake_max_rounds", "wake_max_extensions",
+                                "dormant_scope_sessions", "dormant_whitelist_users", "dormant_whitelist_sessions"],
+            "section_harass_scope": ["harass_scope_sessions", "harass_whitelist_users", "harass_whitelist_sessions"],
+        }
+        migrated = 0
+        for sec, keys in _section_map.items():
+            section_cfg = cfg.setdefault(sec, {})
+            fields = section_cfg.setdefault("fields", section_cfg)  # 兼容 s 版 "fields" 结构
+            for key in keys:
+                if key in cfg:
+                    fields[key] = cfg[key]
+                    del cfg[key]
+                    migrated += 1
+        cfg["config_version"] = 2
+        if migrated > 0:
+            logger.info(f"[Debounce] 检测到旧版扁平配置，已自动迁移 {migrated} 个配置项到分组结构（config_version=2）")
+            try:
+                from core.utils.path_utils import get_config_path
+                _cfg_path = get_config_path() / "plugins" / "default-chat（z）.json"
+                if _cfg_path.parent.exists():
+                    with open(_cfg_path, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, indent=4, ensure_ascii=False)
+                    logger.info(f"[Debounce] 迁移配置已写回: {_cfg_path}")
+            except Exception as e:
+                logger.warning(f"[Debounce] 迁移写回配置文件失败（不影响本次运行）: {e}")
+        else:
+            # 没有旧扁平键（已是新结构），仍需标记版本
+            cfg["config_version"] = 2
+
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
+        self._migrate_flat_config(cfg)
         self.session_events: dict[str, asyncio.Event] = {}
         self.session_tasks: dict[str, asyncio.Task] = {}
         bot_cfg = ctx.config["bot_config"].get("bot", {})
         self.debounce_interval = _safe_float(bot_cfg.get("max_message_interval"), 1.5)
         self.max_buffer_messages = _safe_int(bot_cfg.get("max_buffer_messages"), 3)
-        # 消息合并间隔顺延
-        _mws = self.plugin_cfg.get("merge_window_seconds", -1)
+        # === 分组读取辅助：从 section 结构取值（兼容旧扁平残留） ===
+        def _sec(section_name, key, default):
+            _sec_cfg = self.plugin_cfg.get(section_name, {}) or {}
+            _fields = _sec_cfg.get("fields", _sec_cfg) or {}
+            return _fields.get(key, default)
+        _basic = lambda k, d: _sec("section_basic", k, d)
+        _media = lambda k, d: _sec("section_media", k, d)
+        _pres = lambda k, d: _sec("section_presence", k, d)
+        _dmp = lambda k, d: _sec("section_dm_presence", k, d)
+        _dorm = lambda k, d: _sec("section_dormant", k, d)
+        _hscope = lambda k, d: _sec("section_harass_scope", k, d)
+        # 消息合并间隔顺延（默认 -1=自动取框架值）
+        _mws = _basic("merge_window_seconds", -1)
         if _mws is None or _mws == -1:
             self.merge_window_seconds = self.debounce_interval
         elif _mws == 0:
             self.merge_window_seconds = 0
         else:
             self.merge_window_seconds = float(_mws)
-        self.max_unmentioned_messages = _safe_int(self.plugin_cfg.get("max_unmentioned_messages"), 5)
-        self.receive_unmentioned = self.plugin_cfg.get("receive_unmentioned", False)
-        self.group_chat_prompt = self.plugin_cfg.get("group_chat_prompt", '### 群聊环境说明\r\n\r\n当前为群聊环境，你需要聚焦于**和你有直接关联**或**你十分感兴趣**的消息，对于仅显示为[动画表情]或[图片]的消息不用互动，注意不要刷屏，可以选择不回复任何消息，直接输出<msg/>即可。\r\n\r\n## 消息感知\r\n\r\n你可能会同时收到多条消息，请根据上下文自主决策该回复哪些消息，注意不要刷屏，也可以选择不回复任何消息，直接输出<msg/>即可。\r\n你可以使用 <reasoning>reasoning_content</reasoning> 的标签格式来输出推理内容放在整个输出的最前面，用于推理应该回复哪些消息，回复语气，回复条数，消息分段情况等。\r\n<reasoning>标签和<msg>标签同级，**禁止**将次标签放到<msg>标签内。\r\n**符合以上规则的情况下**确保你想发的聊天消息在<text>标签内，不要遗漏。\r\n')
-        self.group_proactive_chat = self.plugin_cfg.get("group_proactive_chat", False)
-        self.group_proactive_chat_probability = _safe_float(self.plugin_cfg.get("group_proactive_chat_probability"), 0.1)
-        self.proactive_k_prob_enabled = self.plugin_cfg.get("proactive_k_prob_enabled", True)
+        # 顺延调试日志开关（section_basic.debug_log_enabled）
+        self._merge_debug = _basic("debug_log_enabled", False)
+        self.max_unmentioned_messages = _safe_int(_basic("max_unmentioned_messages", 5), 5)
+        self.receive_unmentioned = _basic("receive_unmentioned", False)
+        self.group_chat_prompt = _basic("group_chat_prompt", '### 群聊环境说明\r\n\r\n当前为群聊环境，你需要聚焦于**和你有直接关联**或**你十分感兴趣**的消息，对于仅显示为[动画表情]或[图片]的消息不用互动，注意不要刷屏，可以选择不回复任何消息，直接输出<msg/>即可。\r\n\r\n## 消息感知\r\n\r\n你可能会同时收到多条消息，请根据上下文自主决策该回复哪些消息，注意不要刷屏，也可以选择不回复任何消息，直接输出<msg/>即可。\r\n你可以使用 <reasoning>reasoning_content</reasoning> 的标签格式来输出推理内容放在整个输出的最前面，用于推理应该回复哪些消息，回复语气，回复条数，消息分段情况等。\r\n<reasoning>标签和<msg>标签同级，**禁止**将次标签放到<msg>标签内。\r\n**符合以上规则的情况下**确保你想发的聊天消息在<text>标签内，不要遗漏。\r\n')
+        self.group_proactive_chat = _basic("group_proactive_chat", False)
+        self.group_proactive_chat_probability = _safe_float(_basic("group_proactive_chat_probability", 0.1), 0.1)
+        self.proactive_k_prob_enabled = _basic("proactive_k_prob_enabled", True)
         self.proactive_scope_sessions = set(
-            str(x) for x in (self.plugin_cfg.get("proactive_scope_sessions") or [])
+            str(x) for x in (_basic("proactive_scope_sessions", []) or [])
         )
         # 主动屏蔽工具开关（manage_ignore）：关闭后 bot 不再能主动屏蔽骚扰
-        self.enable_manage_ignore = self.plugin_cfg.get("enable_manage_ignore", True)
+        self.enable_manage_ignore = _basic("enable_manage_ignore", True)
 
-        self.waking_words = cfg.get("waking_words", [])
+        self.waking_words = _basic("waking_words", [])
 
         # 图片/表情/转发消息处理配置
-        self.image_recognition_only_on_mention = cfg.get("image_recognition_only_on_mention", True)
-        self.image_recognition_probability = _safe_float(cfg.get("image_recognition_probability"), 1.0)
-        self.max_images_per_message = _safe_int(cfg.get("max_images_per_message"), 3)
-        self.forward_recognition_only_on_mention = cfg.get("forward_recognition_only_on_mention", True)
+        self.image_recognition_only_on_mention = _media("image_recognition_only_on_mention", True)
+        self.image_recognition_probability = _safe_float(_media("image_recognition_probability", 1.0), 1.0)
+        self.max_images_per_message = _safe_int(_media("max_images_per_message", 3), 3)
+        self.forward_recognition_only_on_mention = _media("forward_recognition_only_on_mention", True)
 
         # 语音消息处理配置
-        self.voice_recognition_only_on_mention = cfg.get("voice_recognition_only_on_mention", True)
-        self.voice_private_need_mention = cfg.get("voice_private_need_mention", True)  # 私聊是否需要@/回复
-        self.voice_max_duration = _safe_int(cfg.get("voice_max_duration"), 0)
+        self.voice_recognition_only_on_mention = _media("voice_recognition_only_on_mention", True)
+        self.voice_private_need_mention = _media("voice_private_need_mention", True)  # 私聊是否需要@/回复
+        self.voice_max_duration = _safe_int(_media("voice_max_duration", 0), 0)
 
         # 队列合并 / 积压处理（BatchMergeScheduler）
         self.merge_scheduler = BatchMergeScheduler(ctx, self.plugin_cfg, bot_cfg)
@@ -80,52 +163,57 @@ class DebouncePlugin(BasePlugin):
         self.media_recognizer = ParallelMediaRecognizer(ctx, self.plugin_cfg, bot_cfg)
 
         # ========== 聊天增强引擎（存在感节流/骚扰感知化/休眠状态机/通知合并） ==========
-        # z 版 schema 是扁平结构，把新配置包成 section 结构传给引擎
+        # z 版 schema 已改为分组模式，从 section 结构读取（与 s 版一致）
         _enhance_cfg = {
-            "presence_window_size": self.plugin_cfg.get("presence_window_size", 20),
-            "presence_decay_minutes": self.plugin_cfg.get("presence_decay_minutes", 10),
-            "presence_target_ratio": self.plugin_cfg.get("presence_target_ratio", 0.3),
-            "presence_k_min": self.plugin_cfg.get("presence_k_min", 0.2),
-            "presence_k_max": self.plugin_cfg.get("presence_k_max", 2.0),
-            "idle_bonus_score": self.plugin_cfg.get("idle_bonus_score", 15),
-            "force_suppress": self.plugin_cfg.get("force_suppress", False),
-            "score_gate_deny": self.plugin_cfg.get("proactive_score_gate_deny", True),
-            "score_gate_boost": self.plugin_cfg.get("proactive_score_gate_boost", True),
-            "score_threshold": self.plugin_cfg.get("score_threshold", 60),
-            "dormant_ranges": self.plugin_cfg.get("dormant_ranges", []),
-            "dormant_wake_probability": self.plugin_cfg.get("dormant_wake_probability", 0.3),
-            "wake_keep_mode": self.plugin_cfg.get("wake_keep_mode", "renew"),
-            "wake_keep_seconds": self.plugin_cfg.get("wake_keep_seconds", 300),
-            "wake_max_rounds": self.plugin_cfg.get("wake_max_rounds", -1),
-            "wake_max_extensions": self.plugin_cfg.get("wake_max_extensions", -1),
-            "harass_scope_sessions": self.plugin_cfg.get("harass_scope_sessions", []),
-            "harass_whitelist_users": self.plugin_cfg.get("harass_whitelist_users", []),
-            "harass_whitelist_sessions": self.plugin_cfg.get("harass_whitelist_sessions", []),
-            "dormant_scope_sessions": self.plugin_cfg.get("dormant_scope_sessions", []),
-            "dormant_whitelist_users": self.plugin_cfg.get("dormant_whitelist_users", []),
-            "dormant_whitelist_sessions": self.plugin_cfg.get("dormant_whitelist_sessions", []),
+            "presence_window_size": _pres("presence_window_size", 20),
+            "presence_decay_minutes": _pres("presence_decay_minutes", 10),
+            "presence_target_ratio": _pres("presence_target_ratio", 0.3),
+            "presence_k_min": _pres("presence_k_min", 0.2),
+            "presence_k_max": _pres("presence_k_max", 2.0),
+            "idle_bonus_score": _pres("idle_bonus_score", 15),
+            "force_suppress": _pres("force_suppress", False),
+            "score_gate_deny": _basic("proactive_score_gate_deny", True),
+            "score_gate_boost": _basic("proactive_score_gate_boost", True),
+            "score_threshold": _pres("score_threshold", 60),
+            "score_increment": _pres("score_increment", 1),
+            "score_penalty": _pres("score_penalty", 5),
+            "score_cap": _pres("score_cap", 100),
+            "idle_bonus_ratio": _pres("idle_bonus_ratio", 1.5),
+            "dormant_ranges": _dorm("dormant_ranges", []),
+            "dormant_wake_probability": _dorm("dormant_wake_probability", 0.3),
+            "wake_keep_mode": _dorm("wake_keep_mode", "renew"),
+            "wake_keep_seconds": _dorm("wake_keep_seconds", 300),
+            "wake_max_rounds": _dorm("wake_max_rounds", -1),
+            "wake_max_extensions": _dorm("wake_max_extensions", -1),
+            "harass_scope_sessions": _hscope("harass_scope_sessions", []),
+            "harass_whitelist_users": _hscope("harass_whitelist_users", []),
+            "harass_whitelist_sessions": _hscope("harass_whitelist_sessions", []),
+            "dormant_scope_sessions": _dorm("dormant_scope_sessions", []),
+            "dormant_whitelist_users": _dorm("dormant_whitelist_users", []),
+            "dormant_whitelist_sessions": _dorm("dormant_whitelist_sessions", []),
             # 私聊独立参数
-            "dm_presence_enabled": self.plugin_cfg.get("dm_presence_enabled", True),
-            "dm_presence_window_size": self.plugin_cfg.get("dm_presence_window_size", 10),
-            "dm_presence_target_ratio": self.plugin_cfg.get("dm_presence_target_ratio", 0.7),
-            "dm_presence_k_min": self.plugin_cfg.get("dm_presence_k_min", 0.5),
-            "dm_presence_k_max": self.plugin_cfg.get("dm_presence_k_max", 2.0),
-            "dm_score_threshold": self.plugin_cfg.get("dm_score_threshold", 30),
-            "dm_score_increment": self.plugin_cfg.get("dm_score_increment", 2),
-            "dm_score_penalty": self.plugin_cfg.get("dm_score_penalty", 3),
-            "dm_score_cap": self.plugin_cfg.get("dm_score_cap", 50),
-            "dm_idle_bonus_score": self.plugin_cfg.get("dm_idle_bonus_score", 15),
-            "dm_idle_bonus_ratio": self.plugin_cfg.get("dm_idle_bonus_ratio", 1.5),
+            "dm_presence_enabled": _dmp("dm_presence_enabled", True),
+            "dm_presence_window_size": _dmp("dm_presence_window_size", 10),
+            "dm_presence_target_ratio": _dmp("dm_presence_target_ratio", 0.7),
+            "dm_presence_k_min": _dmp("dm_presence_k_min", 0.5),
+            "dm_presence_k_max": _dmp("dm_presence_k_max", 2.0),
+            "dm_score_threshold": _dmp("dm_score_threshold", 30),
+            "dm_score_increment": _dmp("dm_score_increment", 2),
+            "dm_score_penalty": _dmp("dm_score_penalty", 3),
+            "dm_score_cap": _dmp("dm_score_cap", 50),
+            "dm_idle_bonus_score": _dmp("dm_idle_bonus_score", 15),
+            "dm_idle_bonus_ratio": _dmp("dm_idle_bonus_ratio", 1.5),
         }
         for _kind in ("poke", "at", "keyword", "reply"):
+            _pk = _sec(f"section_{_kind}", "enabled", False)
             _enhance_cfg[f"section_{_kind}"] = {
-                "enabled": self.plugin_cfg.get(f"{_kind}_enabled", _kind in ("poke", "at")),
-                "window_seconds": self.plugin_cfg.get(f"{_kind}_window_seconds", 60),
-                "threshold": self.plugin_cfg.get(f"{_kind}_threshold", 3 if _kind != "keyword" else 5),
-                "default_duration": self.plugin_cfg.get(f"{_kind}_default_duration", 180),
-                "allow_bot_duration": self.plugin_cfg.get(f"{_kind}_allow_bot_duration", True),
-                "max_duration": self.plugin_cfg.get(f"{_kind}_max_duration", 300),
-                "scope": self.plugin_cfg.get(f"{_kind}_scope", "per_user"),
+                "enabled": _sec(f"section_{_kind}", "enabled", _kind in ("poke", "at")),
+                "window_seconds": _sec(f"section_{_kind}", "window_seconds", 60),
+                "threshold": _sec(f"section_{_kind}", "threshold", 3 if _kind != "keyword" else 5),
+                "default_duration": _sec(f"section_{_kind}", "default_duration", 180),
+                "allow_bot_duration": _sec(f"section_{_kind}", "allow_bot_duration", True),
+                "max_duration": _sec(f"section_{_kind}", "max_duration", 300),
+                "scope": _sec(f"section_{_kind}", "scope", "per_user"),
             }
         self.enhance = ChatEnhanceEngine(ctx, _enhance_cfg, self, merge_seconds=self.debounce_interval)
 
@@ -532,11 +620,15 @@ class DebouncePlugin(BasePlugin):
                 event.clear()
                 if self.merge_window_seconds > 0:
                     # 消息合并间隔顺延：新消息到达时重置计时器
+                    if self._merge_debug:
+                        logger.info(f"[Debounce] 顺延开始 session={sid}, 窗口={self.merge_window_seconds}s")
                     remaining = self.merge_window_seconds
                     while remaining > 0:
                         try:
                             await asyncio.wait_for(event.wait(), timeout=remaining)
                             event.clear()
+                            if self._merge_debug:
+                                logger.info(f"[Debounce] 顺延重置 session={sid}（新消息到达，重新等待 {self.merge_window_seconds}s）")
                             remaining = self.merge_window_seconds
                         except asyncio.TimeoutError:
                             break
@@ -551,6 +643,8 @@ class DebouncePlugin(BasePlugin):
                 buffer_len = self.ctx.message_processor.get_session_buffer_length(sid)
                 if buffer_len == 0:
                     continue
+                if self._merge_debug:
+                    logger.info(f"[Debounce] 顺延结束 session={sid}（{self.merge_window_seconds}s 无新消息），flush {buffer_len} 条")
                 try:
                     await self.ctx.message_processor.flush_session_messages(sid)
                 except Exception:
