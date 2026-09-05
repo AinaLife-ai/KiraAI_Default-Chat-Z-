@@ -83,6 +83,86 @@
     "minimum": 0,
     "hint": "仅当语音时长不超过此值时才会尝试识别（0表示不限制）。超过此秒数的语音会直接替换为[长语音 X秒]。对缺少时长元数据的语音（如被引用的机器人自己的语音）会尽力估算时长后再判断。"
   },
+  "section_queue_merge": {
+    "type": "section",
+    "name": "队列合并 / 积压处理",
+    "collapsed": true,
+    "fields": {
+      "enabled": {
+        "name": "启用队列合并",
+        "type": "switch",
+        "default": true,
+        "hint": "积压批次合并后推送给 LLM；关闭则保持原有行为"
+      },
+      "max_merge_seconds": {
+        "name": "超时合并(秒)",
+        "type": "float",
+        "default": 0,
+        "hint": "积压批次攒批达到该时长即合并推送（无论消息多少）；0=不攒批：当前批次一完成，积压批次全部合并推送，分批仅由下方各上限（批次数/消息数/token）控制。若要设置时间，建议值不超过所用 LLM 单次回复平均耗时的一半（如 LLM 回复通常需 10 秒，可设 5 秒）"
+      },
+      "max_merge_batches_limit": {
+        "name": "单次最大合并批次数",
+        "type": "integer",
+        "default": 0,
+        "hint": "0=不限；一次合并最多包含的批次数，超过的留到下一轮"
+      },
+      "max_merge_messages": {
+        "name": "单次合并消息条数上限",
+        "type": "integer",
+        "default": -1,
+        "hint": "-1=自动：(未提及消息缓冲上限 + 最大缓冲消息数) × 3，未提及功能未开启时不计前者；0=不限；正整数=固定上限，超过则拆批"
+      },
+      "max_merge_est_tokens": {
+        "name": "单次合并估计token上限",
+        "type": "integer",
+        "default": 0,
+        "hint": "0=不限；按字符数/估算系数估算，超过则拆批"
+      },
+      "token_est_ratio": {
+        "name": "token估算系数(字符/token)",
+        "type": "float",
+        "default": 2.0,
+        "hint": "估算token = 文本字符数 / 该系数"
+      },
+      "short_merge_max_messages": {
+        "name": "软合并消息数上限",
+        "type": "integer",
+        "default": -1,
+        "hint": "-1=继承 bot 配置的 max_buffer_messages；pending 消息总数不超过该值（且满足合并消息/token上限）时，提前合并（不等超时到点）"
+      },
+      "media_preprocess_enabled": {
+        "name": "媒体预处理合并限制",
+        "type": "switch",
+        "default": true,
+        "hint": "开启时：含图片/语音的批次合并数量受下方上限约束，避免 VLM/STT 预处理过长；关闭时：不限制"
+      },
+      "media_preprocess_max_batches": {
+        "name": "媒体预处理最大合并批次数",
+        "type": "integer",
+        "default": 0,
+        "hint": "0=不限；积压中含图片/语音的批次达到该数量后，新到的含媒体批次直接放行独立处理，避免媒体积压与VLM/STT重复预处理"
+      },
+      "inflight_stall_timeout": {
+        "name": "批次卡死超时(秒)",
+        "type": "float",
+        "default": -1,
+        "minimum": -1,
+        "hint": "当前批次自最后一次 LLM 响应起超过该时长仍无动静（任务崩溃/被其它插件拦截导致收尾事件缺失）时，强制推送积压批次，避免该会话队列死锁。-1=自动跟随（WebUI 里设置的 LLM 模型超时+工具执行超时）；0=不设置（关闭兜底，LLM 挂起由框架超时兜底）；正整数=手动覆盖"
+      },
+      "debug_log_enabled": {
+        "name": "调试日志",
+        "type": "switch",
+        "default": false,
+        "hint": "开启后打印队列合并调试日志（放行/拦截/软合并/超时合并/拆批等决策），便于排查"
+      },
+      "merge_window_seconds": {
+        "type": "float",
+        "name": "消息合并间隔顺延（秒）",
+        "default": -1,
+        "hint": "消息在框架 buffer 层合并时启用防抖重置：buffer 内最后一条消息到达后 N 秒无新消息才 flush 成批次送 LLM，期间新消息到达则重置倒计时重新等待。-1=自动取框架值并启用顺延；0=不启用顺延（按 WebUI 设定走一次固定间隔）；>0=自定义秒数。不会无限等待：框架最大缓冲消息（max_buffer_messages）会兜底"
+      }
+    }
+  },
   "section_media_recognition": {
     "type": "section",
     "name": "媒体识别（并行 VLM/STT）",
@@ -561,11 +641,5 @@
     "name": "私聊闲时判定倍数",
     "type": "float",
     "default": 1.5
-  },
-  "merge_window_seconds": {
-    "type": "float",
-    "name": "消息合并间隔顺延（秒）",
-    "default": -1,
-    "hint": "buffer 层防抖重置：新消息到达重置倒计时。-1=自动取框架值；0=不启用；>0=自定义秒数"
   }
 }
