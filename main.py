@@ -81,7 +81,15 @@ class DebouncePlugin(BasePlugin):
         migrated = 0
         for sec, keys in _section_map.items():
             section_cfg = cfg.setdefault(sec, {})
-            fields = section_cfg.setdefault("fields", section_cfg)  # 兼容 s 版 "fields" 结构
+            # 框架生成的 section 是扁平 dict（{key: default}）；若已有 "fields" 包装（s 版风格）则用之
+            if isinstance(section_cfg, dict) and "fields" in section_cfg and isinstance(section_cfg["fields"], dict):
+                fields = section_cfg["fields"]
+            else:
+                # 无 fields 包装：直接把 section 当扁平 dict 用
+                fields = section_cfg
+                if not isinstance(fields, dict):
+                    fields = {}
+                    cfg[sec] = fields
             for key in keys:
                 if key in cfg:
                     fields[key] = cfg[key]
@@ -114,7 +122,14 @@ class DebouncePlugin(BasePlugin):
         # === 分组读取辅助：从 section 结构取值（兼容旧扁平残留） ===
         def _sec(section_name, key, default):
             _sec_cfg = self.plugin_cfg.get(section_name, {}) or {}
-            _fields = _sec_cfg.get("fields", _sec_cfg) or {}
+            if isinstance(_sec_cfg, dict) and "fields" in _sec_cfg and isinstance(_sec_cfg["fields"], dict):
+                # s 版风格：{key: {...}, fields: {child: {...}}}
+                _fields = _sec_cfg["fields"]
+            else:
+                # 扁平 section：直接查键
+                _fields = _sec_cfg
+            if not isinstance(_fields, dict):
+                return default
             return _fields.get(key, default)
         _basic = lambda k, d: _sec("section_basic", k, d)
         _media = lambda k, d: _sec("section_media", k, d)
@@ -415,13 +430,21 @@ class DebouncePlugin(BasePlugin):
         if action == "unblock":
             if target_type == "all":
                 return "请指定要解除的用户或会话"
-            return self.enhance.harass.unblock(sid, target_id, block_type)
+            result = self.enhance.harass.unblock(sid, target_id, block_type)
+            logger.info(f"[Enhance] 解除屏蔽(工具): {target_type} {target_id} {block_type} → {result}")
+            return result
         # block
         if target_type == "all":
-            return self.enhance.harass.apply_ignore("*", "*", block_type, duration)
+            result = self.enhance.harass.apply_ignore("*", "*", block_type, duration)
+            logger.info(f"[Enhance] 屏蔽(工具): all {block_type} {duration}s → {result}")
+            return result
         if target_type == "session":
-            return self.enhance.harass.apply_ignore(sid, "*", block_type, duration)
-        return self.enhance.harass.apply_ignore(sid, target_id, block_type, duration)
+            result = self.enhance.harass.apply_ignore(sid, "*", block_type, duration)
+            logger.info(f"[Enhance] 屏蔽(工具): session {sid} {block_type} {duration}s → {result}")
+            return result
+        result = self.enhance.harass.apply_ignore(sid, target_id, block_type, duration)
+        logger.info(f"[Enhance] 屏蔽(工具): user {target_id} {block_type} {duration}s → {result}")
+        return result
 
     def _is_proactive_allowed(self, sid: str) -> bool:
         """群聊积极概率作用域检查：scope 非空时仅这些会话生效（空=全部）。"""
