@@ -17,6 +17,12 @@
     "default": 5,
     "hint": "缓冲区中最多保留多少条非唤醒消息作为上下文"
   },
+  "merge_window_seconds": {
+    "type": "float",
+    "name": "消息合并间隔顺延（秒）",
+    "default": -1,
+    "hint": "buffer 层防抖重置：新消息到达重置倒计时。-1=自动取框架值；0=不启用；>0=自定义秒数"
+  },
   "group_chat_prompt": {
     "name": "群聊额外提示词",
     "type": "markdown",
@@ -154,12 +160,6 @@
         "type": "switch",
         "default": false,
         "hint": "开启后打印队列合并调试日志（放行/拦截/软合并/超时合并/拆批等决策），便于排查"
-      },
-      "merge_window_seconds": {
-        "type": "float",
-        "name": "消息合并间隔顺延（秒）",
-        "default": -1,
-        "hint": "buffer 层防抖重置：新消息到达重置倒计时。-1=自动取框架值；0=不启用；>0=自定义秒数"
       }
     }
   },
