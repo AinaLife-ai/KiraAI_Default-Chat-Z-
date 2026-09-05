@@ -13,20 +13,21 @@
       "receive_unmentioned": {
         "name": "接收非唤醒消息",
         "type": "switch",
-        "default": false,
+        "default": true,
         "hint": "是否将非唤醒消息也加入上下文（用于持续对话）"
       },
       "max_unmentioned_messages": {
         "name": "最大非唤醒消息数",
         "type": "integer",
         "default": 5,
+        "minimum": 1,
         "hint": "缓冲区中最多保留多少条非唤醒消息作为上下文"
       },
       "merge_window_seconds": {
         "type": "float",
         "name": "消息合并间隔顺延（秒）",
         "default": -1,
-        "hint": "新消息到达重置倒计时。-1=自动取webui设置值；0=不启用；>0=自定义秒数"
+        "hint": "消息合并间隔顺延（buffer 防抖重置）：最后一条消息到达后 N 秒无新消息才 flush 成批次送 LLM，期间新消息到达重置倒计时。-1=自动取 WebUI 设置值并启用顺延；0=不启用顺延（按 WebUI 固定间隔）；>0=自定义秒数。不会无限等待：框架最大缓冲消息（max_buffer_messages）会兜底"
       },
       "group_chat_prompt": {
         "name": "群聊额外提示词",
@@ -64,19 +65,19 @@
         "name": "门槛过滤（群聊主动概率）",
         "type": "switch",
         "default": true,
-        "hint": "概率命中但累计分不足时阻止触发，分继续攒"
+        "hint": "群聊主动概率路径：概率命中但累计分不足时阻止触发，分继续攒"
       },
       "proactive_score_gate_boost": {
         "name": "补偿触发（群聊主动概率）",
         "type": "switch",
         "default": true,
-        "hint": "概率未命中但累计分达标时强制触发并清零"
+        "hint": "群聊主动概率路径：概率未命中但累计分达标时强制触发并清零"
       },
       "proactive_k_prob_enabled": {
-        "name": "概率调节",
+        "name": "概率调节（群聊主动概率）",
         "type": "switch",
         "default": true,
-        "hint": "是否受 k_prob 调节系数影响（回少提高/回多降低）"
+        "hint": "群聊主动概率是否受 k_prob 调节系数影响（回少提高/回多降低）"
       },
       "debug_log_enabled": {
         "type": "switch",
@@ -88,14 +89,14 @@
   },
   "section_media": {
     "type": "section",
-    "name": "媒体消息处理",
-    "collapsed": false,
+    "name": "消息处理（图片/语音/转发）",
+    "collapsed": true,
     "fields": {
       "image_recognition_only_on_mention": {
         "name": "仅唤醒消息识图",
         "type": "switch",
-        "default": true,
-        "hint": "为true时，只有唤醒消息（@或唤醒词）中的图片/动画表情会保留（识别）；非唤醒消息中的全部替换为文本。为false时，所有消息中的图片/表情按概率和数量处理。"
+        "default": false,
+        "hint": "为 true 时，只有唤醒消息中的图片/动画表情会保留（识别）；非唤醒消息中的全部替换为 [图片]。为 false 时，按概率和数量处理。"
       },
       "image_recognition_probability": {
         "name": "识图概率",
@@ -103,459 +104,465 @@
         "default": 1,
         "minimum": 0,
         "maximum": 1,
-        "hint": "非唤醒消息中图片/表情被保留的概率（仅在image_recognition_only_on_mention=false时生效）。"
+        "hint": "非唤醒消息中图片/表情被保留的概率（仅在 image_recognition_only_on_mention=false 时生效）"
       },
       "max_images_per_message": {
         "name": "最多保留图片/表情数",
         "type": "integer",
         "default": 3,
         "minimum": 0,
-        "hint": "每条消息最多保留的图片+动画表情数量（超出部分替换为文本）。仅在image_recognition_only_on_mention=false时生效。"
+        "hint": "每条消息最多保留的图片+动画表情数量（超出部分替换为 [图片]）。仅在 image_recognition_only_on_mention=false 时生效"
       },
       "forward_recognition_only_on_mention": {
         "name": "仅唤醒消息解析转发",
         "type": "switch",
         "default": true,
-        "hint": "为true时，只有唤醒消息中的合并转发消息会被展开显示详细内容；非唤醒消息中的转发消息替换为[转发消息]。为false时，所有转发消息都展开（注意：可能消耗较多token）。"
+        "hint": "为 true 时，只有唤醒消息中的合并转发消息会被展开显示详细内容；非唤醒消息中的转发消息替换为 [转发消息]。为 false 时，所有转发消息都展开（注意：可能消耗较多 token）。"
       },
       "voice_recognition_only_on_mention": {
         "name": "仅唤醒消息识别语音（群聊）",
         "type": "switch",
-        "default": true,
-        "hint": "为true时，只有唤醒消息中的语音会尝试识别；非唤醒消息中的语音替换为[语音]。"
+        "default": false,
+        "hint": "为 true 时，只有唤醒消息中的语音会尝试识别；非唤醒消息中的语音替换为 [语音]。"
       },
       "voice_private_need_mention": {
         "name": "私聊需要引用才识别语音",
         "type": "switch",
-        "default": true,
-        "hint": "为true时，私聊中只有引用机器人（回复）的语音才尝试识别；为false时，私聊中所有语音都尝试识别（需STT模型）。"
+        "default": false,
+        "hint": "为 true 时，私聊中只有引用机器人（回复）的语音才尝试识别；为 false 时，私聊中所有语音都尝试识别（需 STT 模型）。"
       },
       "voice_max_duration": {
         "name": "语音最大识别时长（秒）",
         "type": "integer",
         "default": 0,
         "minimum": 0,
-        "hint": "仅当语音时长不超过此值时才会尝试识别（0表示不限制）。超过此秒数的语音会直接替换为[长语音 X秒]。对缺少时长元数据的语音（如被引用的机器人自己的语音）会尽力估算时长后再判断。"
+        "hint": "仅当语音时长不超过此值时才会尝试识别（0 表示不限制）。超过此秒数的语音会直接替换为 [长语音 X秒]。对缺少时长元数据的语音（如被引用的机器人自己的语音）会尽力估算时长后再判断。"
       }
     }
   },
-  "section_presence": {
+  "section_group_sustain": {
     "type": "section",
-    "name": "群聊存在感",
-    "collapsed": false,
+    "name": "群聊持续对话",
+    "collapsed": true,
     "fields": {
-      "presence_window_size": {
-        "type": "integer",
-        "name": "统计窗口（条）",
-        "default": 20,
-        "hint": "取最近 N 条消息计算 bot 发言占比"
-      },
-      "presence_decay_minutes": {
-        "type": "float",
-        "name": "时间衰减（分钟）",
-        "default": 10,
-        "hint": "仅统计最近 N 分钟内的消息，0 为只用条数窗口"
-      },
-      "presence_target_ratio": {
-        "type": "float",
-        "name": "目标占比",
-        "default": 0.3,
-        "hint": "bot 发言占比基准（0-1），高于它降概率，低于它提概率"
-      },
-      "presence_k_min": {
-        "type": "float",
-        "name": "调节系数下限",
-        "default": 0.2,
-        "hint": "概率调节系数最小值（0-1，1 为不降）"
-      },
-      "presence_k_max": {
-        "type": "float",
-        "name": "调节系数上限",
-        "default": 2.0,
-        "hint": "概率调节系数最大值（1-2，2 为概率翻倍）"
-      },
-      "idle_bonus_score": {
-        "type": "float",
-        "name": "闲时加分",
-        "default": 15,
-        "hint": "静默时长高于该会话历史平均时加分"
-      },
-      "force_suppress": {
+      "sustain_enabled": {
+        "name": "启用群聊持续对话",
         "type": "switch",
-        "name": "强制通路超额抑制",
         "default": false,
-        "hint": "开启后 bot 发言占比过高时，被唤醒也降级为评分门槛"
+        "hint": "开启后，AI 回复后的一段时间内，群聊中的非唤醒消息有机会自动触发再次回复"
       },
-      "score_threshold": {
+      "sustain_window_seconds": {
+        "name": "群聊持续窗口（秒）",
         "type": "float",
-        "name": "评分阈值",
-        "default": 60,
-        "hint": "评分补正判定阈值（0-100）"
+        "default": 180,
+        "minimum": 1,
+        "hint": "AI 每次回复后，在此时间内收到的非唤醒消息才有机会触发持续回复"
       },
-      "score_increment": {
-        "name": "评分加分（每条用户消息）",
+      "sustain_reply_probability": {
+        "name": "群聊持续回复概率",
         "type": "float",
-        "default": 1,
-        "hint": "累计加分机制：每条用户消息 +N 分，攒到评分阈值补触发一次后清零。默认 1"
+        "default": 0.5,
+        "minimum": 0,
+        "maximum": 1,
+        "hint": "窗口内收到非唤醒消息时，触发再次回复的概率"
       },
-      "score_penalty": {
-        "name": "评分扣分（每次 bot 回复）",
-        "type": "float",
-        "default": 5,
-        "hint": "累计加分机制：bot 每次回复 -N 分（下限 0）。bot 回复越多分越低，补触发越少"
+      "max_sustain_replies": {
+        "name": "群聊最大持续回复次数",
+        "type": "integer",
+        "default": -1,
+        "minimum": -1,
+        "hint": "一次唤醒后最多连续回复的次数（-1 表示无限）"
       },
-      "score_cap": {
-        "name": "评分上限",
-        "type": "float",
-        "default": 100,
-        "hint": "累计分上限，防止长时间无 bot 回复时分数无限累积"
+      "sustain_stop_keywords": {
+        "name": "用户消息停止关键词（群聊）",
+        "type": "list",
+        "default": [],
+        "hint": "当用户消息包含这些关键词（不区分大小写）时，自动停止持续对话"
       },
-      "idle_bonus_ratio": {
-        "name": "闲时判定倍数",
-        "type": "float",
-        "default": 1.5,
-        "hint": "相对判定：静默时长超过该会话历史平均静默 × 倍数才算闲时（冷场）。0=不判闲时"
+      "stop_on_ai_keywords": {
+        "name": "AI回复停止关键词（群聊）",
+        "type": "list",
+        "default": [
+          "晚安",
+          "再见",
+          "拜拜",
+          "下次再聊",
+          "下次聊",
+          "不聊了",
+          "不想理",
+          "不理你",
+          "不说了"
+        ],
+        "hint": "当 AI 回复内容中包含这些关键词（不区分大小写）时，自动停止持续对话"
+      },
+      "stop_on_ai_empty": {
+        "name": "AI空消息停止持续回复（群聊）",
+        "type": "switch",
+        "default": true,
+        "hint": "当 AI 输出仅包含空消息（<msg/> 或 <msg></msg>）时，自动停止持续对话"
+      },
+      "sustain_mode": {
+        "name": "群聊持续回复模式",
+        "type": "enum",
+        "options": [
+          "per_message",
+          "per_round"
+        ],
+        "default": "per_round",
+        "hint": "per_message: 窗口内每条非唤醒消息独立判断概率；per_round: 窗口内只判断第一条非唤醒消息，后续不再判断"
+      },
+      "sustain_allowed_sessions": {
+        "name": "群聊白名单（sid）",
+        "type": "list",
+        "default": [],
+        "hint": "仅对这些 sid 生效，填写后黑名单失效。格式如 qq:gm:123456"
+      },
+      "sustain_denied_sessions": {
+        "name": "群聊黑名单（sid）",
+        "type": "list",
+        "default": [],
+        "hint": "排除这些 sid，白名单为空时生效。格式如 qq:gm:123456"
+      },
+      "sustain_judge_timing": {
+        "name": "持续回复判定时机",
+        "type": "enum",
+        "options": [
+          "both",
+          "either",
+          "llm_processing",
+          "after_reply"
+        ],
+        "default": "either",
+        "hint": "both: LLM 处理期间与回复后两个时机都判定；either: 任一时机判定，窗口重叠时一轮只判一次；llm_processing: 仅 LLM 处理期间判定；after_reply: 仅 LLM 回复后判定（本插件传统行为，处理期间消息只缓存不判）"
+      },
+      "sustain_retry_on_empty": {
+        "type": "switch",
+        "name": "空消息后评分补上再触发",
+        "default": false,
+        "hint": "开启后 bot 输出空消息只是这次不回，窗口保留，评分补上时再给一次触发机会（默认关）"
+      },
+      "sustain_score_gate_deny": {
+        "name": "门槛过滤",
+        "type": "switch",
+        "default": false,
+        "hint": "群聊持续对话：概率命中但累计分不足时阻止触发"
+      },
+      "sustain_score_gate_boost": {
+        "name": "补偿触发",
+        "type": "switch",
+        "default": false,
+        "hint": "群聊持续对话：概率未命中但累计分达标时强制触发并清零"
+      },
+      "sustain_k_prob_enabled": {
+        "name": "概率调节",
+        "type": "switch",
+        "default": false,
+        "hint": "群聊持续对话是否受 k_prob 调节系数影响（回少提高/回多降低）"
       }
     }
   },
-  "section_dm_presence": {
+  "section_dm_sustain": {
     "type": "section",
-    "name": "私聊独立参数",
-    "collapsed": false,
+    "name": "私聊持续对话",
+    "collapsed": true,
     "fields": {
+      "dm_sustain_enabled": {
+        "name": "启用私聊持续对话",
+        "type": "switch",
+        "default": false,
+        "hint": "开启后，AI 在私聊回复后，若用户在窗口内未回复，可主动再次发送消息"
+      },
+      "dm_sustain_window_range": {
+        "name": "私聊窗口时间范围（基准/波动）",
+        "type": "string",
+        "default": "60s/45s",
+        "hint": "格式如 30s/10s（等待20~40秒），1min/30s（30~90秒）。支持 h/m/s 单位"
+      },
+      "dm_sustain_reply_probability": {
+        "name": "私聊主动回复概率",
+        "type": "float",
+        "default": 0.3,
+        "minimum": 0,
+        "maximum": 1,
+        "hint": "窗口超时后触发主动回复的概率"
+      },
+      "dm_max_sustain_replies": {
+        "name": "私聊最大持续回复次数",
+        "type": "integer",
+        "default": -1,
+        "minimum": -1,
+        "hint": "-1 表示无限"
+      },
+      "dm_sustain_mode": {
+        "name": "私聊持续模式",
+        "type": "enum",
+        "options": [
+          "per_round",
+          "per_retry"
+        ],
+        "default": "per_retry",
+        "hint": "per_round: 每次AI回复后只尝试一次；per_retry: 失败后继续重试直到成功或达到上限"
+      },
+      "dm_max_retry_attempts": {
+        "name": "私聊最大重试次数",
+        "type": "integer",
+        "default": 3,
+        "minimum": 1,
+        "hint": "仅 per_retry 模式生效，连续失败达到此次数后停止"
+      },
+      "dm_sustain_stop_keywords": {
+        "name": "用户消息停止关键词（私聊）",
+        "type": "list",
+        "default": [],
+        "hint": "用户消息包含这些词（不区分大小写）时停止持续对话"
+      },
+      "dm_stop_on_ai_keywords": {
+        "name": "AI回复停止关键词（私聊）",
+        "type": "list",
+        "default": [
+          "晚安",
+          "再见",
+          "拜拜",
+          "下次再聊",
+          "下次聊",
+          "不聊了",
+          "不想理",
+          "不理你",
+          "不说了"
+        ],
+        "hint": "AI 回复包含这些词时停止持续对话"
+      },
+      "dm_stop_on_ai_empty": {
+        "name": "AI空消息停止（私聊）",
+        "type": "switch",
+        "default": true,
+        "hint": "AI 输出 <msg/> 或 <msg></msg> 时停止持续对话"
+      },
+      "dm_allowed_users": {
+        "name": "私聊白名单（sid）",
+        "type": "list",
+        "default": [],
+        "hint": "仅对这些 sid 生效，填写后黑名单失效"
+      },
+      "dm_denied_users": {
+        "name": "私聊黑名单（sid）",
+        "type": "list",
+        "default": [],
+        "hint": "排除这些 sid，白名单为空时生效"
+      },
+      "dm_proactive_prompt": {
+        "name": "私聊主动触发提示词",
+        "type": "markdown",
+        "default": "请根据当前对话上下文，自然地主动发送一条消息，可以随意开启新话题或延续之前的聊天并使用合适的工具，认为互动时机不佳也可以直接发送</msg>。不要提及这是主动触发。",
+        "hint": "当私聊持续对话触发主动发送时，此内容将作为用户消息发给AI，AI会据此回复。"
+      },
+      "dm_retry_on_user_stop": {
+        "name": "用户停止词触发重试",
+        "type": "switch",
+        "default": true,
+        "hint": "per_retry 模式下，用户消息包含停止词时是否算作一次失败并继续重试（形成延后并有机会再次主动回复）"
+      },
+      "dm_retry_on_ai_stop": {
+        "name": "AI停止词/空消息触发重试",
+        "type": "switch",
+        "default": true,
+        "hint": "per_retry 模式下，AI 回复包含停止词或输出空消息时是否算作一次失败并继续重试（形成延后并有机会再次主动回复）"
+      },
+      "dm_tool_blacklist": {
+        "name": "私聊主动触发的禁用工具名称",
+        "type": "list",
+        "default": [],
+        "hint": "在私聊主动触发时，禁止 AI 使用这些工具（如 memory_add, github_search）。留空表示不限制。"
+      },
+      "dm_tool_blacklist_mode": {
+        "name": "私聊工具黑名单匹配模式",
+        "type": "enum",
+        "options": [
+          "partial",
+          "exact"
+        ],
+        "default": "partial",
+        "hint": "partial: 工具名包含关键词即禁用；exact: 完全匹配才禁用"
+      },
+      "dm_retry_on_empty": {
+        "type": "switch",
+        "name": "空消息评分补触发（私聊）",
+        "default": false,
+        "hint": "AI 输出空消息时重新开窗，评分补上时再给一次主动触发机会（默认关=空消息结束本轮）"
+      },
+      "dm_sustain_score_gate_deny": {
+        "name": "门槛过滤",
+        "type": "switch",
+        "default": false,
+        "hint": "私聊持续对话：概率命中但累计分不足时阻止触发"
+      },
+      "dm_sustain_score_gate_boost": {
+        "name": "补偿触发",
+        "type": "switch",
+        "default": false,
+        "hint": "私聊持续对话：概率未命中但累计分达标时强制触发并清零"
+      },
+      "dm_k_prob_enabled": {
+        "name": "概率调节",
+        "type": "switch",
+        "default": false,
+        "hint": "私聊持续对话是否受 k_prob 调节系数影响（回少提高/回多降低）"
+      },
       "dm_presence_enabled": {
         "name": "私聊独立存在感节流",
         "type": "switch",
         "default": true,
-        "hint": "私聊使用独立参数。关则与群聊共享"
+        "hint": "私聊使用独立的存在感节流/评分参数。关则与群聊共享"
       },
       "dm_presence_window_size": {
         "name": "私聊窗口条数",
         "type": "integer",
-        "default": 10
+        "default": 10,
+        "hint": "取最近 N 条消息计算 bot 发言占比"
       },
       "dm_presence_target_ratio": {
         "name": "私聊发言占比基准",
         "type": "float",
-        "default": 0.7
+        "default": 0.7,
+        "hint": "bot 发言占比基准（0-1），高于它降概率、低于它提概率"
       },
       "dm_presence_k_min": {
         "name": "私聊概率下限",
         "type": "float",
-        "default": 0.5
+        "default": 0.5,
+        "hint": "概率调节系数最小值（0-1，1 为不降）"
       },
       "dm_presence_k_max": {
         "name": "私聊概率上限",
         "type": "float",
-        "default": 2.0
+        "default": 2.0,
+        "hint": "概率调节系数最大值（1-2）"
       },
       "dm_score_threshold": {
         "name": "私聊评分阈值",
         "type": "float",
-        "default": 30
+        "default": 30,
+        "hint": "累计分达标阈值"
       },
       "dm_score_increment": {
         "name": "私聊加分",
         "type": "float",
-        "default": 2
+        "default": 2,
+        "hint": "用户消息 +N 分"
       },
       "dm_score_penalty": {
         "name": "私聊扣分",
         "type": "float",
-        "default": 3
+        "default": 3,
+        "hint": "bot 回复 -N 分"
       },
       "dm_score_cap": {
         "name": "私聊评分上限",
         "type": "float",
-        "default": 50
+        "default": 50,
+        "hint": "累计分上限"
       },
       "dm_idle_bonus_score": {
         "name": "私聊闲时加分",
         "type": "float",
-        "default": 15
+        "default": 15,
+        "hint": "静默时长高于平均时加分"
       },
       "dm_idle_bonus_ratio": {
         "name": "私聊闲时判定倍数",
         "type": "float",
-        "default": 1.5
+        "default": 1.5,
+        "hint": "静默 > 平均 × 倍数才算闲时"
       }
     }
   },
-  "section_poke": {
+  "section_scheduled": {
     "type": "section",
-    "name": "戳一戳屏蔽",
-    "collapsed": false,
+    "name": "定时主动任务",
+    "collapsed": true,
     "fields": {
-      "poke_enabled": {
+      "scheduled_enabled": {
+        "name": "启用定时主动任务",
         "type": "switch",
-        "name": "戳一戳检测",
-        "default": true,
-        "hint": "时间窗内戳一戳次数达阈值时通知 bot"
-      },
-      "poke_window_seconds": {
-        "type": "float",
-        "name": "戳一戳窗口（秒）",
-        "default": 60
-      },
-      "poke_threshold": {
-        "type": "integer",
-        "name": "戳一戳阈值",
-        "default": 3
-      },
-      "poke_default_duration": {
-        "type": "integer",
-        "name": "戳一戳默认屏蔽（秒）",
-        "default": 180
-      },
-      "poke_allow_bot_duration": {
-        "type": "switch",
-        "name": "戳一戳允许 bot 自设时长",
-        "default": true
-      },
-      "poke_max_duration": {
-        "type": "integer",
-        "name": "戳一戳最大屏蔽（秒）",
-        "default": 300
-      },
-      "poke_scope": {
-        "type": "enum",
-        "name": "戳一戳累计范围",
-        "default": "per_user",
-        "options": [
-          "per_user",
-          "all"
-        ]
-      }
-    }
-  },
-  "section_at": {
-    "type": "section",
-    "name": "连续 at 屏蔽",
-    "collapsed": false,
-    "fields": {
-      "at_enabled": {
-        "type": "switch",
-        "name": "连续 at检测",
-        "default": true,
-        "hint": "时间窗内连续 at次数达阈值时通知 bot"
-      },
-      "at_window_seconds": {
-        "type": "float",
-        "name": "连续 at窗口（秒）",
-        "default": 60
-      },
-      "at_threshold": {
-        "type": "integer",
-        "name": "连续 at阈值",
-        "default": 3
-      },
-      "at_default_duration": {
-        "type": "integer",
-        "name": "连续 at默认屏蔽（秒）",
-        "default": 180
-      },
-      "at_allow_bot_duration": {
-        "type": "switch",
-        "name": "连续 at允许 bot 自设时长",
-        "default": true
-      },
-      "at_max_duration": {
-        "type": "integer",
-        "name": "连续 at最大屏蔽（秒）",
-        "default": 300
-      },
-      "at_scope": {
-        "type": "enum",
-        "name": "连续 at累计范围",
-        "default": "per_user",
-        "options": [
-          "per_user",
-          "all"
-        ]
-      }
-    }
-  },
-  "section_keyword": {
-    "type": "section",
-    "name": "连续关键词屏蔽",
-    "collapsed": false,
-    "fields": {
-      "keyword_enabled": {
-        "type": "switch",
-        "name": "连续关键词检测",
         "default": false,
-        "hint": "时间窗内连续关键词次数达阈值时通知 bot"
+        "hint": "开启后，按设定时间自动在指定会话中发送消息"
       },
-      "keyword_window_seconds": {
-        "type": "float",
-        "name": "连续关键词窗口（秒）",
-        "default": 60
-      },
-      "keyword_threshold": {
-        "type": "integer",
-        "name": "连续关键词阈值",
-        "default": 5
-      },
-      "keyword_default_duration": {
-        "type": "integer",
-        "name": "连续关键词默认屏蔽（秒）",
-        "default": 180
-      },
-      "keyword_allow_bot_duration": {
-        "type": "switch",
-        "name": "连续关键词允许 bot 自设时长",
-        "default": true
-      },
-      "keyword_max_duration": {
-        "type": "integer",
-        "name": "连续关键词最大屏蔽（秒）",
-        "default": 300
-      },
-      "keyword_scope": {
-        "type": "enum",
-        "name": "连续关键词累计范围",
-        "default": "per_user",
-        "options": [
-          "per_user",
-          "all"
-        ]
-      }
-    }
-  },
-  "section_reply": {
-    "type": "section",
-    "name": "引用唤醒屏蔽",
-    "collapsed": false,
-    "fields": {
-      "reply_enabled": {
-        "type": "switch",
-        "name": "引用唤醒检测",
-        "default": false,
-        "hint": "时间窗内引用唤醒次数达阈值时通知 bot"
-      },
-      "reply_window_seconds": {
-        "type": "float",
-        "name": "引用唤醒窗口（秒）",
-        "default": 60
-      },
-      "reply_threshold": {
-        "type": "integer",
-        "name": "引用唤醒阈值",
-        "default": 3
-      },
-      "reply_default_duration": {
-        "type": "integer",
-        "name": "引用唤醒默认屏蔽（秒）",
-        "default": 180
-      },
-      "reply_allow_bot_duration": {
-        "type": "switch",
-        "name": "引用唤醒允许 bot 自设时长",
-        "default": true
-      },
-      "reply_max_duration": {
-        "type": "integer",
-        "name": "引用唤醒最大屏蔽（秒）",
-        "default": 300
-      },
-      "reply_scope": {
-        "type": "enum",
-        "name": "引用唤醒累计范围",
-        "default": "per_user",
-        "options": [
-          "per_user",
-          "all"
-        ]
-      }
-    }
-  },
-  "section_dormant": {
-    "type": "section",
-    "name": "休眠状态机",
-    "collapsed": false,
-    "fields": {
-      "dormant_ranges": {
+      "scheduled_sessions": {
+        "name": "定时任务会话列表（sid）",
         "type": "list",
-        "name": "休眠时段（每行一条）",
         "default": [],
-        "hint": "格式 HH:MM-HH:MM，start>end 表示跨午夜；留空表示无休眠时段（全天活跃）"
+        "hint": "填写要执行任务的 sid，如 qq:gm:123456 或 qq:dm:7890"
       },
-      "dormant_wake_probability": {
-        "type": "float",
-        "name": "起夜概率",
-        "default": 0.3,
-        "hint": "休眠期内被提及（@/唤醒词/戳一戳）推送给 LLM 的概率（0-1）"
+      "scheduled_max_per_round": {
+        "name": "每轮最多发送会话数",
+        "type": "integer",
+        "default": 1,
+        "minimum": 1,
+        "hint": "每次触发时从列表中随机抽取最多多少个会话发送"
       },
-      "wake_keep_mode": {
+      "scheduled_type": {
+        "name": "调度类型",
         "type": "enum",
-        "name": "维持模式",
-        "default": "renew",
         "options": [
-          "renew",
-          "once"
+          "interval",
+          "cron"
         ],
-        "hint": "renew=续窗型，once=一次性型"
+        "default": "interval",
+        "hint": "interval: 间隔式（基准/波动）；cron: Cron 表达式"
       },
-      "wake_keep_seconds": {
-        "type": "float",
-        "name": "维持时长（秒）",
-        "default": 300,
-        "hint": "唤醒后保持可聊的时长"
+      "scheduled_interval_expression": {
+        "name": "间隔表达式",
+        "type": "string",
+        "default": "5m/270s",
+        "hint": "格式如 5m/30s（4.5~5.5分钟），1h/10m（50~70分钟）。支持 h/m/s 单位"
       },
-      "wake_max_rounds": {
+      "scheduled_cron": {
+        "name": "Cron 表达式",
+        "type": "string",
+        "default": "0 */1 * * *",
+        "hint": "仅当调度类型为 cron 时生效，如 0 9 * * * 表示每天9点"
+      },
+      "scheduled_context_count": {
+        "name": "上下文消息条数",
         "type": "integer",
-        "name": "最大互动次数",
-        "default": -1,
-        "hint": "唤醒后最大互动次数，-1 不限"
+        "default": 10,
+        "minimum": 1,
+        "hint": "读取历史消息时最多取多少条"
       },
-      "wake_max_extensions": {
+      "scheduled_fetch_history": {
+        "name": "拉取历史（若为空）",
+        "type": "switch",
+        "default": true,
+        "hint": "若会话无历史，尝试从 OneBot API 拉取最近消息作为初始上下文"
+      },
+      "scheduled_initial_history_count": {
+        "name": "首次拉取历史条数",
         "type": "integer",
-        "name": "主动续窗次数上限",
-        "default": -1,
-        "hint": "bot 主动续窗次数上限，-1 无限，0 不能续"
+        "default": 10,
+        "minimum": 1,
+        "hint": "拉取历史时获取的消息条数"
       },
-      "dormant_scope_sessions": {
-        "type": "list",
-        "name": "休眠作用域（sid）",
-        "default": [],
-        "hint": "仅这些会话启用休眠时段，留空=全部启用。格式如 qq:gm:123456"
+      "scheduled_prompt": {
+        "name": "定时任务提示词",
+        "type": "markdown",
+        "default": "根据人设和上下文自然发言与使用你想用的工具并返回结果，严禁暴露这是定时任务",
+        "hint": "插入到 system prompt 中指导 AI 行为，例如：根据上下文自然发言，严禁暴露这是定时任务"
       },
-      "dormant_whitelist_users": {
+      "scheduled_tool_blacklist": {
+        "name": "定时任务禁用工具名称",
         "type": "list",
-        "name": "休眠白名单（用户）",
         "default": [],
-        "hint": "这些用户不受休眠限制（被提及直接唤醒），填了不生效。格式如 QQ号"
+        "hint": "在定时任务触发时，禁止 AI 使用这些工具（如 memory_add, github_search）。留空表示不限制。"
       },
-      "dormant_whitelist_sessions": {
-        "type": "list",
-        "name": "休眠白名单（会话）",
-        "default": [],
-        "hint": "这些会话不受休眠限制，填了不生效。格式如 qq:gm:123456"
-      }
-    }
-  },
-  "section_harass_scope": {
-    "type": "section",
-    "name": "防骚扰作用域",
-    "collapsed": false,
-    "fields": {
-      "harass_scope_sessions": {
-        "type": "list",
-        "name": "防骚扰作用域（sid）",
-        "default": [],
-        "hint": "仅这些会话启用骚扰检测，留空=全部启用。格式如 qq:gm:123456"
-      },
-      "harass_whitelist_users": {
-        "type": "list",
-        "name": "防骚扰白名单（用户）",
-        "default": [],
-        "hint": "这些用户不检测骚扰，填了不生效。格式如 QQ号"
-      },
-      "harass_whitelist_sessions": {
-        "type": "list",
-        "name": "防骚扰白名单（会话）",
-        "default": [],
-        "hint": "这些会话不检测骚扰，填了不生效。格式如 qq:gm:123456"
+      "scheduled_tool_blacklist_mode": {
+        "name": "定时任务工具黑名单匹配模式",
+        "type": "enum",
+        "options": [
+          "partial",
+          "exact"
+        ],
+        "default": "partial",
+        "hint": "partial: 工具名包含关键词即禁用；exact: 完全匹配才禁用"
       }
     }
   },
@@ -715,6 +722,494 @@
         "minimum": 10,
         "maximum": 100,
         "hint": "JPEG 压缩质量（仅图片压缩识别开启时生效），通常越小识别越快，但识别效果可能受影响"
+      }
+    }
+  },
+  "section_presence": {
+    "type": "section",
+    "name": "存在感节流",
+    "collapsed": true,
+    "hint": "bot 发言占比过高时自动降低触发概率（回少提高、回多降低）",
+    "fields": {
+      "presence_window_size": {
+        "type": "integer",
+        "name": "统计窗口（条）",
+        "default": 20,
+        "hint": "取最近 N 条消息计算 bot 发言占比"
+      },
+      "presence_decay_minutes": {
+        "type": "float",
+        "name": "时间衰减（分钟）",
+        "default": 10,
+        "hint": "仅统计最近 N 分钟内的消息，0 为只用条数窗口"
+      },
+      "presence_target_ratio": {
+        "type": "float",
+        "name": "目标占比",
+        "default": 0.3,
+        "hint": "bot 发言占比基准（0-1），高于它降概率，低于它提概率"
+      },
+      "presence_k_min": {
+        "type": "float",
+        "name": "调节系数下限",
+        "default": 0.2,
+        "hint": "概率调节系数最小值（0-1，1 为不降）"
+      },
+      "presence_k_max": {
+        "type": "float",
+        "name": "调节系数上限",
+        "default": 2.0,
+        "hint": "概率调节系数最大值（1-2，2 为概率翻倍）"
+      },
+      "idle_bonus_score": {
+        "type": "float",
+        "name": "闲时加分",
+        "default": 15,
+        "hint": "静默时长高于该会话历史平均时加分（活跃群/死群标准不同）"
+      },
+      "force_suppress": {
+        "type": "switch",
+        "name": "强制通路超额抑制",
+        "default": false,
+        "hint": "开启后 bot 发言占比过高时，被唤醒也降级为评分门槛（分值到了才回）"
+      },
+      "score_threshold": {
+        "type": "float",
+        "name": "评分阈值",
+        "default": 60,
+        "hint": "评分补正判定阈值（0-100，越高越挑剔）"
+      },
+      "score_increment": {
+        "name": "评分加分（每条用户消息）",
+        "type": "float",
+        "default": 1,
+        "hint": "累计加分机制：每条用户消息 +N 分，攒到评分阈值补触发一次后清零。默认 1"
+      },
+      "score_penalty": {
+        "name": "评分扣分（每次 bot 回复）",
+        "type": "float",
+        "default": 5,
+        "hint": "累计加分机制：bot 每次回复 -N 分（下限 0）。bot 回复越多分越低，补触发越少"
+      },
+      "score_cap": {
+        "name": "评分上限",
+        "type": "float",
+        "default": 100,
+        "hint": "累计分上限，防止长时间无 bot 回复时分数无限累积"
+      },
+      "idle_bonus_ratio": {
+        "name": "闲时判定倍数",
+        "type": "float",
+        "default": 1.5,
+        "hint": "相对判定：静默时长超过该会话历史平均静默 × 倍数才算闲时（冷场）。活跃群/死群标准不同。0=不判闲时（闲时加分关闭）"
+      },
+      "mentioned_score_gate_deny": {
+        "name": "门槛过滤（提及消息）",
+        "type": "switch",
+        "default": false,
+        "hint": "@/关键词/引用消息：评分不足时阻止触发，降级为未提及处理"
+      },
+      "mentioned_score_gate_boost": {
+        "name": "补偿触发（提及消息）",
+        "type": "switch",
+        "default": false,
+        "hint": "@/关键词/引用消息：分够时强制触发（默认关，即提及消息不受评分影响）"
+      },
+      "mentioned_dm_score_gate_deny": {
+        "name": "门槛过滤（私聊提及消息）",
+        "type": "switch",
+        "default": false,
+        "hint": "私聊用户消息：评分不足时阻止触发（默认关，即私聊用户消息不受评分影响）"
+      },
+      "mentioned_dm_score_gate_boost": {
+        "name": "补偿触发（私聊提及消息）",
+        "type": "switch",
+        "default": false,
+        "hint": "私聊用户消息：分够时强制触发"
+      }
+    }
+  },
+  "section_poke": {
+    "type": "section",
+    "name": "戳一戳骚扰",
+    "collapsed": true,
+    "hint": "频繁被戳时通知 bot，由 bot 用 XML 决策是否屏蔽",
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用检测",
+        "default": true,
+        "hint": "时间窗内被戳次数达阈值时通知 bot"
+      },
+      "window_seconds": {
+        "type": "float",
+        "name": "时间窗口（秒）",
+        "default": 60,
+        "hint": "统计窗口时长"
+      },
+      "threshold": {
+        "type": "integer",
+        "name": "次数阈值",
+        "default": 3,
+        "hint": "窗口内戳次数达该值触发通知"
+      },
+      "default_duration": {
+        "type": "integer",
+        "name": "默认屏蔽时长（秒）",
+        "default": 180,
+        "hint": "bot 不指定时长时使用的屏蔽时长"
+      },
+      "allow_bot_duration": {
+        "type": "switch",
+        "name": "允许 bot 自设时长",
+        "default": true,
+        "hint": "bot 可在 XML 里指定屏蔽时长（不指定用默认值）"
+      },
+      "max_duration": {
+        "type": "integer",
+        "name": "最大屏蔽时长（秒）",
+        "default": 300,
+        "hint": "bot 自设时长超过该值则钳制（仅允许自设时生效）"
+      },
+      "scope": {
+        "type": "enum",
+        "name": "累计范围",
+        "default": "per_user",
+        "options": [
+          "per_user",
+          "all"
+        ],
+        "hint": "per_user=按单用户累计，all=按会话内所有用户累计"
+      }
+    }
+  },
+  "section_at": {
+    "type": "section",
+    "name": "连续 at 骚扰",
+    "collapsed": true,
+    "hint": "频繁被 @ 时通知 bot，由 bot 用 XML 决策是否屏蔽",
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用检测",
+        "default": true,
+        "hint": "时间窗内被 @ 次数达阈值时通知 bot"
+      },
+      "window_seconds": {
+        "type": "float",
+        "name": "时间窗口（秒）",
+        "default": 60
+      },
+      "threshold": {
+        "type": "integer",
+        "name": "次数阈值",
+        "default": 3
+      },
+      "default_duration": {
+        "type": "integer",
+        "name": "默认屏蔽时长（秒）",
+        "default": 180
+      },
+      "allow_bot_duration": {
+        "type": "switch",
+        "name": "允许 bot 自设时长",
+        "default": true
+      },
+      "max_duration": {
+        "type": "integer",
+        "name": "最大屏蔽时长（秒）",
+        "default": 300
+      },
+      "scope": {
+        "type": "enum",
+        "name": "累计范围",
+        "default": "per_user",
+        "options": [
+          "per_user",
+          "all"
+        ]
+      }
+    }
+  },
+  "section_keyword": {
+    "type": "section",
+    "name": "连续关键词唤醒骚扰",
+    "collapsed": true,
+    "hint": "频繁命中唤醒词时通知 bot，由 bot 用 XML 决策是否屏蔽",
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用检测",
+        "default": false
+      },
+      "window_seconds": {
+        "type": "float",
+        "name": "时间窗口（秒）",
+        "default": 60
+      },
+      "threshold": {
+        "type": "integer",
+        "name": "次数阈值",
+        "default": 5
+      },
+      "default_duration": {
+        "type": "integer",
+        "name": "默认屏蔽时长（秒）",
+        "default": 180
+      },
+      "allow_bot_duration": {
+        "type": "switch",
+        "name": "允许 bot 自设时长",
+        "default": true
+      },
+      "max_duration": {
+        "type": "integer",
+        "name": "最大屏蔽时长（秒）",
+        "default": 300
+      },
+      "scope": {
+        "type": "enum",
+        "name": "累计范围",
+        "default": "per_user",
+        "options": [
+          "per_user",
+          "all"
+        ]
+      }
+    }
+  },
+  "section_reply": {
+    "type": "section",
+    "name": "引用唤醒骚扰",
+    "collapsed": true,
+    "hint": "频繁被引用回复时通知 bot，由 bot 用 XML 决策是否屏蔽",
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用检测",
+        "default": false
+      },
+      "window_seconds": {
+        "type": "float",
+        "name": "时间窗口（秒）",
+        "default": 60
+      },
+      "threshold": {
+        "type": "integer",
+        "name": "次数阈值",
+        "default": 3
+      },
+      "default_duration": {
+        "type": "integer",
+        "name": "默认屏蔽时长（秒）",
+        "default": 180
+      },
+      "allow_bot_duration": {
+        "type": "switch",
+        "name": "允许 bot 自设时长",
+        "default": true
+      },
+      "max_duration": {
+        "type": "integer",
+        "name": "最大屏蔽时长（秒）",
+        "default": 300
+      },
+      "scope": {
+        "type": "enum",
+        "name": "累计范围",
+        "default": "per_user",
+        "options": [
+          "per_user",
+          "all"
+        ]
+      }
+    }
+  },
+  "section_dormant": {
+    "type": "section",
+    "name": "休眠时段",
+    "collapsed": true,
+    "hint": "休眠时段内 bot 不主动触发，被提及按起夜概率唤醒；默认留空=全天活跃",
+    "fields": {
+      "dormant_ranges": {
+        "type": "list",
+        "name": "休眠时段（每行一条）",
+        "default": [],
+        "hint": "格式 HH:MM-HH:MM，start>end 表示跨午夜（如 23:00-08:00）；留空表示无休眠时段（全天活跃）"
+      },
+      "dormant_wake_probability": {
+        "type": "float",
+        "name": "起夜概率",
+        "default": 0.3,
+        "hint": "休眠期内被提及（@/唤醒词/戳一戳）推送给 LLM 的概率（0-1）"
+      },
+      "wake_keep_mode": {
+        "type": "enum",
+        "name": "维持模式",
+        "default": "renew",
+        "options": [
+          "renew",
+          "once"
+        ],
+        "hint": "renew=续窗型（LLM 最后回复完再没人找才计时），once=一次性型（唤醒后计时到点结束）"
+      },
+      "wake_keep_seconds": {
+        "type": "float",
+        "name": "维持时长（秒）",
+        "default": 300,
+        "hint": "唤醒后保持可聊的时长"
+      },
+      "wake_max_rounds": {
+        "type": "integer",
+        "name": "最大互动次数",
+        "default": -1,
+        "hint": "唤醒后最大互动次数，-1 不限"
+      },
+      "wake_max_extensions": {
+        "type": "integer",
+        "name": "主动续窗次数上限",
+        "default": -1,
+        "hint": "bot 主动续窗次数上限，-1 无限，0 不能续"
+      },
+      "dormant_scope_sessions": {
+        "type": "list",
+        "name": "休眠作用域（sid）",
+        "default": [],
+        "hint": "仅这些会话启用休眠时段，留空=全部启用。格式如 qq:gm:123456"
+      },
+      "dormant_whitelist_users": {
+        "type": "list",
+        "name": "休眠白名单（用户）",
+        "default": [],
+        "hint": "这些用户不受休眠限制（被提及直接唤醒），填了不生效。格式如 QQ号"
+      },
+      "dormant_whitelist_sessions": {
+        "type": "list",
+        "name": "休眠白名单（会话）",
+        "default": [],
+        "hint": "这些会话不受休眠限制，填了不生效。格式如 qq:gm:123456"
+      }
+    }
+  },
+  "section_harass_scope": {
+    "type": "section",
+    "name": "防骚扰作用域与白名单",
+    "collapsed": true,
+    "hint": "作用域限定检测会话（留空=全部）；白名单内用户/会话不检测",
+    "fields": {
+      "harass_scope_sessions": {
+        "type": "list",
+        "name": "防骚扰作用域（sid）",
+        "default": [],
+        "hint": "仅这些会话启用骚扰检测，留空=全部启用。格式如 qq:gm:123456"
+      },
+      "harass_whitelist_users": {
+        "type": "list",
+        "name": "防骚扰白名单（用户）",
+        "default": [],
+        "hint": "这些用户不检测骚扰，填了不生效。格式如 QQ号"
+      },
+      "harass_whitelist_sessions": {
+        "type": "list",
+        "name": "防骚扰白名单（会话）",
+        "default": [],
+        "hint": "这些会话不检测骚扰，填了不生效。格式如 qq:gm:123456"
+      }
+    }
+  },
+  "section_detect": {
+    "type": "section",
+    "name": "额外信号开关",
+    "collapsed": false,
+    "hint": "user_msgs/session_msgs 群聊与私聊各自独立开关（私聊默认关）；bot_speech 仅群聊",
+    "fields": {
+      "detect_user_msgs": {
+        "type": "switch",
+        "name": "单用户消息条数检测（群聊）",
+        "default": false,
+        "hint": "时间窗内某用户消息条数达阈值时通知 bot（防刷屏轰炸）"
+      },
+      "detect_session_msgs": {
+        "type": "switch",
+        "name": "会话消息条数检测（群聊）",
+        "default": false,
+        "hint": "时间窗内会话消息条数达阈值时通知 bot（防群刷屏）"
+      },
+      "detect_bot_speech": {
+        "type": "switch",
+        "name": "bot 发言条数检测（群聊）",
+        "default": false,
+        "hint": "时间窗内 bot 自己发言条数达阈值时通知（防自己刷屏）"
+      },
+      "dm_detect_user_msgs": {
+        "type": "switch",
+        "name": "单用户消息条数检测（私聊）",
+        "default": false,
+        "hint": "私聊中某用户消息条数达阈值时通知（默认关：私聊消息频率属正常交流，主动开启后统计）"
+      },
+      "dm_detect_session_msgs": {
+        "type": "switch",
+        "name": "会话消息条数检测（私聊）",
+        "default": false,
+        "hint": "私聊会话消息条数达阈值时通知（默认关）"
+      }
+    }
+  },
+  "section_thresholds": {
+    "type": "section",
+    "name": "额外信号阈值",
+    "collapsed": true,
+    "hint": "各信号的窗口与阈值（群聊/私聊各自独立）",
+    "fields": {
+      "user_msgs_window_seconds": {
+        "type": "float",
+        "name": "单用户消息窗口（群聊，秒）",
+        "default": 60
+      },
+      "user_msgs_threshold": {
+        "type": "integer",
+        "name": "单用户消息阈值（群聊）",
+        "default": 10
+      },
+      "session_msgs_window_seconds": {
+        "type": "float",
+        "name": "会话消息窗口（群聊，秒）",
+        "default": 60
+      },
+      "session_msgs_threshold": {
+        "type": "integer",
+        "name": "会话消息阈值（群聊）",
+        "default": 20
+      },
+      "bot_speech_window_seconds": {
+        "type": "float",
+        "name": "bot 发言窗口（秒）",
+        "default": 300
+      },
+      "bot_speech_threshold": {
+        "type": "integer",
+        "name": "bot 发言阈值",
+        "default": 10
+      },
+      "dm_user_msgs_window_seconds": {
+        "type": "float",
+        "name": "单用户消息窗口（私聊，秒）",
+        "default": 60
+      },
+      "dm_user_msgs_threshold": {
+        "type": "integer",
+        "name": "单用户消息阈值（私聊）",
+        "default": 10
+      },
+      "dm_session_msgs_window_seconds": {
+        "type": "float",
+        "name": "会话消息窗口（私聊，秒）",
+        "default": 60
+      },
+      "dm_session_msgs_threshold": {
+        "type": "integer",
+        "name": "会话消息阈值（私聊）",
+        "default": 20
       }
     }
   }
