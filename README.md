@@ -1,8 +1,8 @@
-# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.6.6
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.7.0
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
-修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。v1.6.6，KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
+修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。v1.7.0，KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
 
 默认仅唤醒消息（at/关键词/引用回复）中的语音、图片、转发才会识别。关闭对应开关后，非唤醒消息的图片按概率和数量选取，语音/转发全部阅读。
 
@@ -30,6 +30,14 @@
 
 <details>
 <summary>更新日志</summary>
+
+### v1.7.0
+
+- **配置分组升级**：配置项改为与 sustained-chat 一致的分组模式（section_basic / section_media / section_presence / section_dm_presence / section_poke / section_at / section_keyword / section_reply / section_dormant / section_harass_scope），WebUI 更清晰
+- **首次更新自动迁移**：旧版扁平配置升级后自动迁移为分组结构（仅迁移一次，config_version 标记），老用户无需手动改配置
+- **消息合并顺延默认启用**：`merge_window_seconds` 默认 -1（自动取 WebUI 设置值），新装/升级后立刻体现合并顺延特性
+- **顺延调试日志**：`section_basic.debug_log_enabled`（默认关），开启后打印顺延开始/重置/结束日志
+- **清理死代码**：`queue_merge.py` 中未使用的 `merge_window_seconds` 字段移除（积压队列合并仍由 `max_merge_seconds` 超时控制）
 
 ### v1.6.6
 
