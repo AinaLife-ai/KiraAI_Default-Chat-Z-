@@ -762,6 +762,11 @@ class DebouncePlugin(BasePlugin):
                     continue
                 buffer_len = self.ctx.message_processor.get_session_buffer_length(sid)
                 if buffer_len == 0:
+                    # 批次已被外部消费（框架/其他插件在顺延窗口内 flush 了批次）：
+                    # 清理批次状态防止残留 —— 否则 batch_started 遗留 True 会让
+                    # 后续非唤醒消息被误当作"批次内消息"重置顺延 → flush 进 LLM
+                    self.batch_started.pop(sid, None)
+                    self.batch_count.pop(sid, None)
                     continue
                 # 保险丝：flush 只发生在"批次由唤醒/持续命中开启"时；无唤醒来历
                 # （纯围观消息）不 flush，只留作前文等下次真唤醒。防任何路径误触发。
