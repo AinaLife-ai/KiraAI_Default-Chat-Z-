@@ -614,9 +614,11 @@ class DebouncePlugin(BasePlugin):
                 if self.image_recognition_only_on_mention:
                     # 非唤醒：不识别（省 VLM），元素保留 → 官方空占位 [Image , file_path: p] / [Sticker ]
                     elem._media_skip = True
+                    elem.caption = ""  # 阻止框架渲染时 caption is None → 自动 VLM
                 else:
                     if random.random() >= self.image_recognition_probability:
                         elem._media_skip = True
+                        elem.caption = ""  # 阻止框架渲染时自动 VLM
             elif isinstance(elem, Forward):
                 # only_on_mention=True：仅唤醒消息保留转发；False：全部保留
                 if self.forward_recognition_only_on_mention and not is_mentioned:
