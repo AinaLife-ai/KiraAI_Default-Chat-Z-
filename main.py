@@ -304,15 +304,18 @@ class DebouncePlugin(BasePlugin):
             "extra_allow_bot_duration": _sec("section_thresholds", "extra_allow_bot_duration", True),
         }
         for _kind in ("poke", "at", "keyword", "reply"):
-            _pk = _sec(f"section_{_kind}", "enabled", False)
+            # ⚠ 本版 schema 的键名**带分区前缀**（poke_enabled / at_threshold / …），
+            #   这里必须按带前缀的名字去读，否则 WebUI 上这 28 项（屏蔽/骚扰判定）全部不生效。
+            #   （输出给引擎的 key 仍是不带前缀的，引擎约定如此。）
+            _k = f"{_kind}_"
             _enhance_cfg[f"section_{_kind}"] = {
-                "enabled": _sec(f"section_{_kind}", "enabled", _kind in ("poke", "at")),
-                "window_seconds": _sec(f"section_{_kind}", "window_seconds", 60),
-                "threshold": _sec(f"section_{_kind}", "threshold", 3 if _kind != "keyword" else 5),
-                "default_duration": _sec(f"section_{_kind}", "default_duration", 180),
-                "allow_bot_duration": _sec(f"section_{_kind}", "allow_bot_duration", True),
-                "max_duration": _sec(f"section_{_kind}", "max_duration", 300),
-                "scope": _sec(f"section_{_kind}", "scope", "per_user"),
+                "enabled": _sec(f"section_{_kind}", _k + "enabled", _kind in ("poke", "at")),
+                "window_seconds": _sec(f"section_{_kind}", _k + "window_seconds", 60),
+                "threshold": _sec(f"section_{_kind}", _k + "threshold", 3 if _kind != "keyword" else 5),
+                "default_duration": _sec(f"section_{_kind}", _k + "default_duration", 180),
+                "allow_bot_duration": _sec(f"section_{_kind}", _k + "allow_bot_duration", True),
+                "max_duration": _sec(f"section_{_kind}", _k + "max_duration", 300),
+                "scope": _sec(f"section_{_kind}", _k + "scope", "per_user"),
             }
         self.enhance = ChatEnhanceEngine(ctx, _enhance_cfg, self, merge_seconds=self.debounce_interval)
 
