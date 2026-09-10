@@ -199,6 +199,30 @@
         "default": false,
         "hint": "开启后 bot 发言占比过高时，被唤醒也降级为评分门槛"
       },
+      "mentioned_score_gate_deny": {
+              "name": "门槛过滤（提及消息）",
+              "type": "switch",
+              "default": false,
+              "hint": "@/关键词/引用消息：评分不足时阻止触发，降级为未提及处理"
+            },
+      "mentioned_score_gate_boost": {
+              "name": "补偿触发（提及消息）",
+              "type": "switch",
+              "default": false,
+              "hint": "@/关键词/引用消息：分够时强制触发（默认关，即提及消息不受评分影响）"
+            },
+      "mentioned_dm_score_gate_deny": {
+              "name": "门槛过滤（私聊提及消息）",
+              "type": "switch",
+              "default": false,
+              "hint": "私聊用户消息：评分不足时阻止触发（默认关，即私聊用户消息不受评分影响）"
+            },
+      "mentioned_dm_score_gate_boost": {
+              "name": "补偿触发（私聊提及消息）",
+              "type": "switch",
+              "default": false,
+              "hint": "私聊用户消息：分够时强制触发"
+            },
       "score_gate_enabled": {
         "name": "评分门总开关",
         "type": "switch",
