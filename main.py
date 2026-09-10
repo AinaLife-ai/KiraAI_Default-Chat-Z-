@@ -248,6 +248,11 @@ class DebouncePlugin(BasePlugin):
             "score_increment": _pres("score_increment", 1),
             "score_penalty": _pres("score_penalty", 5),
             "score_cap": _pres("score_cap", 100),
+            # 评分加减关键词（群聊/私聊共用同一份；规则见 chat_enhance._pair_keywords）
+            "score_boost_words": _pres("score_boost_words", []),
+            "score_boost_values": _pres("score_boost_values", []),
+            "score_penalty_words": _pres("score_penalty_words", []),
+            "score_penalty_values": _pres("score_penalty_values", []),
             "idle_bonus_ratio": _pres("idle_bonus_ratio", 1.5),
             "dormant_ranges": _dorm("dormant_ranges", []),
             "dormant_wake_probability": _dorm("dormant_wake_probability", 0.3),
@@ -772,6 +777,23 @@ class DebouncePlugin(BasePlugin):
 
     @on.im_message(priority=Priority.HIGH)
     async def handle_msg(self, event: KiraMessageEvent, *_):
+        # === 过滤机器人自己的消息（群聊/私聊一致）===
+        # 适配器会把 bot 自己发出的消息也作为普通消息事件送达（取决于实现/配置，例如
+        # NapCat 的 reportSelfMessage），其 message.self_id 与 sender.user_id 相同。
+        # 若不过滤：消息会被 note_incoming(is_bot=False) 记成「用户消息」——存在感占比、
+        # 累计评分、额外信号（user_msgs/session_msgs）、骚扰检测全部被自身发言污染，
+        # 且与 on.message_sent 的 note_bot_reply(is_bot=True) 重复计数。
+        # bot 自身发言的正确统计口径是「发送事件」(on.message_sent)，故此处整条丢弃。
+        try:
+            _self_id = str(event.message.self_id) if getattr(event.message, "self_id", None) is not None else None
+            _sender_id = str(event.message.sender.user_id) if event.message.sender else None
+            if _self_id and _sender_id and _self_id == _sender_id:
+                logger.debug(f"[Enhance] 忽略机器人自己的消息: {event.message.message_id}")
+                event.discard()
+                return
+        except Exception:
+            pass
+
         # === 空通知事件过滤：QQ 戳一戳别人等系统通知（message_id=None、零内容元素）。
         #     完全不进评分/前文/判定/顺延/骚扰统计（群聊/私聊一致）；poke bot 事件框架会构造 [Poke ...] 文本
         #     （chain 非空）→ 保留（原生唤醒/骚扰语义）；[System: ...] 系统提示、图片/语音/贴纸
