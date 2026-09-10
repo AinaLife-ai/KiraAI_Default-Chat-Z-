@@ -231,6 +231,9 @@ class DebouncePlugin(BasePlugin):
         self.merge_scheduler = BatchMergeScheduler(ctx, self.plugin_cfg, bot_cfg)
         # 并行媒体识别（ParallelMediaRecognizer）
         self.media_recognizer = ParallelMediaRecognizer(ctx, self.plugin_cfg, bot_cfg)
+        # 供「丢弃积压批次时取消在飞预取」使用 + 预取受「媒体预处理」开关控制
+        self.merge_scheduler.media_recognizer = self.media_recognizer
+        self.media_recognizer.prefetch_enabled = self.merge_scheduler.media_preprocess_enabled
 
         # ========== 聊天增强引擎（存在感节流/骚扰感知化/休眠状态机/通知合并） ==========
         # z 版 schema 已改为分组模式，从 section 结构读取（与 s 版一致）
@@ -242,6 +245,11 @@ class DebouncePlugin(BasePlugin):
             "presence_k_max": _pres("presence_k_max", 2.0),
             "idle_bonus_score": _pres("idle_bonus_score", 15),
             "force_suppress": _pres("force_suppress", False),
+            "score_gate_enabled": _pres("score_gate_enabled", True),
+            "mentioned_score_gate_deny": _pres("mentioned_score_gate_deny", False),
+            "mentioned_score_gate_boost": _pres("mentioned_score_gate_boost", False),
+            "mentioned_dm_score_gate_deny": _pres("mentioned_dm_score_gate_deny", False),
+            "mentioned_dm_score_gate_boost": _pres("mentioned_dm_score_gate_boost", False),
             "score_gate_deny": _basic("proactive_score_gate_deny", True),
             "score_gate_boost": _basic("proactive_score_gate_boost", True),
             "score_threshold": _pres("score_threshold", 60),
@@ -300,15 +308,18 @@ class DebouncePlugin(BasePlugin):
             "extra_allow_bot_duration": _sec("section_thresholds", "extra_allow_bot_duration", True),
         }
         for _kind in ("poke", "at", "keyword", "reply"):
-            _pk = _sec(f"section_{_kind}", "enabled", False)
+            # ⚠ 本版 schema 的键名**带分区前缀**（poke_enabled / at_threshold / …），
+            #   这里必须按带前缀的名字去读，否则 WebUI 上这 28 项（屏蔽/骚扰判定）全部不生效。
+            #   （输出给引擎的 key 仍是不带前缀的，引擎约定如此。）
+            _k = f"{_kind}_"
             _enhance_cfg[f"section_{_kind}"] = {
-                "enabled": _sec(f"section_{_kind}", "enabled", _kind in ("poke", "at")),
-                "window_seconds": _sec(f"section_{_kind}", "window_seconds", 60),
-                "threshold": _sec(f"section_{_kind}", "threshold", 3 if _kind != "keyword" else 5),
-                "default_duration": _sec(f"section_{_kind}", "default_duration", 180),
-                "allow_bot_duration": _sec(f"section_{_kind}", "allow_bot_duration", True),
-                "max_duration": _sec(f"section_{_kind}", "max_duration", 300),
-                "scope": _sec(f"section_{_kind}", "scope", "per_user"),
+                "enabled": _sec(f"section_{_kind}", _k + "enabled", _kind in ("poke", "at")),
+                "window_seconds": _sec(f"section_{_kind}", _k + "window_seconds", 60),
+                "threshold": _sec(f"section_{_kind}", _k + "threshold", 3 if _kind != "keyword" else 5),
+                "default_duration": _sec(f"section_{_kind}", _k + "default_duration", 180),
+                "allow_bot_duration": _sec(f"section_{_kind}", _k + "allow_bot_duration", True),
+                "max_duration": _sec(f"section_{_kind}", _k + "max_duration", 300),
+                "scope": _sec(f"section_{_kind}", _k + "scope", "per_user"),
             }
         self.enhance = ChatEnhanceEngine(ctx, _enhance_cfg, self, merge_seconds=self.debounce_interval)
 
@@ -712,10 +723,12 @@ class DebouncePlugin(BasePlugin):
                 if self.image_recognition_only_on_mention:
                     # 非唤醒：不识别（省 VLM），元素保留 → 官方空占位 [Image , file_path: p] / [Sticker ]
                     elem._media_skip = True
+                    elem._media_skip_reason = "mention"
                     elem.caption = ""  # 阻止框架渲染时 caption is None → 自动 VLM
                 else:
                     if random.random() >= self.image_recognition_probability:
                         elem._media_skip = True
+                        elem._media_skip_reason = "probability"
                         elem.caption = ""  # 阻止框架渲染时自动 VLM
             elif isinstance(elem, Forward):
                 # only_on_mention=True：仅唤醒消息保留转发；False：全部保留
@@ -773,6 +786,7 @@ class DebouncePlugin(BasePlugin):
             return
         for idx in reversed(media_indices[max_count:]):
             chain.message_list[idx]._media_skip = True
+            chain.message_list[idx]._media_skip_reason = "cap"
             chain.message_list[idx].caption = ""  # 阻止框架渲染时自动 VLM
 
     @on.im_message(priority=Priority.HIGH)
@@ -898,6 +912,9 @@ class DebouncePlugin(BasePlugin):
                         buffer.pop(count=buffer.get_length()-self.max_unmentioned_messages+1)
                 # 批次已开始：不裁剪（批次内消息只进不出，直到满即推/顺延到点）
                 event.buffer()
+                # 消息已确定进入批次 → 立刻后台预取媒体（含此前被判定"不识别"的）：
+                # 上一个批次的 LLM 正在跑 / 本批次在队列排队，这段时间正好用来识别
+                self.media_recognizer.schedule_prefetch(sid, [event.message])
                 if _batch_on:
                     # 批次计数 +1，满即推检查
                     self.batch_count[sid] = self.batch_count.get(sid, 0) + 1
@@ -944,6 +961,9 @@ class DebouncePlugin(BasePlugin):
 
         # === 唤醒消息：启动/延续批次 ===
         event.buffer()
+        # 消息已确定进入批次 → 立刻后台预取媒体（含此前被判定"不识别"的）：
+        # 上一个批次的 LLM 正在跑 / 本批次在队列排队，这段时间正好用来识别
+        self.media_recognizer.schedule_prefetch(sid, [event.message])
         if not self.batch_started.get(sid, False):
             # 首个唤醒消息：批次开始，计数从 1（含唤醒本身）
             self.batch_started[sid] = True
