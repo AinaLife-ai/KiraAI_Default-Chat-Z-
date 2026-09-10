@@ -231,6 +231,9 @@ class DebouncePlugin(BasePlugin):
         self.merge_scheduler = BatchMergeScheduler(ctx, self.plugin_cfg, bot_cfg)
         # 并行媒体识别（ParallelMediaRecognizer）
         self.media_recognizer = ParallelMediaRecognizer(ctx, self.plugin_cfg, bot_cfg)
+        # 供「丢弃积压批次时取消在飞预取」使用 + 预取受「媒体预处理」开关控制
+        self.merge_scheduler.media_recognizer = self.media_recognizer
+        self.media_recognizer.prefetch_enabled = self.merge_scheduler.media_preprocess_enabled
 
         # ========== 聊天增强引擎（存在感节流/骚扰感知化/休眠状态机/通知合并） ==========
         # z 版 schema 已改为分组模式，从 section 结构读取（与 s 版一致）
@@ -242,6 +245,7 @@ class DebouncePlugin(BasePlugin):
             "presence_k_max": _pres("presence_k_max", 2.0),
             "idle_bonus_score": _pres("idle_bonus_score", 15),
             "force_suppress": _pres("force_suppress", False),
+            "score_gate_enabled": _pres("score_gate_enabled", True),
             "score_gate_deny": _basic("proactive_score_gate_deny", True),
             "score_gate_boost": _basic("proactive_score_gate_boost", True),
             "score_threshold": _pres("score_threshold", 60),
