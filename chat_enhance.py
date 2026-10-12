@@ -1138,7 +1138,15 @@ class ChatEnhanceEngine:
 
     # ---- LLM 响应（宿主 on_llm_response 调用）：存在感记录 + 维持期 ----
 
-    def on_llm_response(self, event, resp) -> None:
+    def on_llm_response(self, event, resp, silent: bool = False) -> None:
+        """LLM 最终文本回复：存在感记录 + 休眠维持期。
+
+        ★ silent=True 表示本轮是**静默轮**（bot 只输出空 msg，什么都没发出去）：
+          此时不计"bot 发言"、不推进休眠维持期计数 —— 静默不是发言。
+          （旧实现无条件计一次，让空 msg 停窗的轮次也被当成发言扣分/续期。）
+        """
+        if silent:
+            return
         sid = getattr(event, "sid", None)
         if sid is None:
             return
@@ -1148,15 +1156,25 @@ class ChatEnhanceEngine:
         self._get_presence(is_dm).note_bot_reply(sid, now)
         self.dormant.note_reply(sid, now)
 
-    # ---- 消息发送（宿主 on.message_sent 调用）：存在感统计 ----
+    # ---- 消息发送（宿主 on.message_sent 调用）：bot 自身发言条数检测 ----
 
     def on_message_sent(self, event) -> None:
+        """**每发送一条消息**调用一次（含一次回复里的多个 <msg> 分段）。
+
+        ⚠ 这里**只**做 bot_speech 条数检测 —— 它是按「条」设计的（设计如此）：
+          时间窗内 bot 自己发出的消息条数达阈值 ⇒ 通知 bot"你说太多了"，
+          并按 bot_speech_block_session 决定是否教它 <ignore>all|duration:N</ignore>
+          把当前会话静音。
+
+        ⚠ 刻意**不**在这里调 note_bot_reply：存在感时间线按「轮」记更符合语义，
+          且 on_llm_response 已按轮记过（并已排除静默轮）。两条通路都记会重复计数
+          （一次回复发 3 段 = 3 条发送事件）。
+        """
         try:
             sid = str(event.session.sid)
         except Exception:
             return
         is_dm = not getattr(event, "is_group_message", lambda: True)()
-        self._get_presence(is_dm).note_bot_reply(sid, time.time())
         # bot_speech 额外信号（仅群聊：私聊 bot 发言频率由自身主动逻辑控制；
         # 私聊对应开关 dm_* 不适用于 bot 自身发言）
         if not self.detect_bot_speech or is_dm:
@@ -1236,6 +1254,23 @@ class ChatEnhanceEngine:
 
     def k_prob(self, sid: str, is_dm: bool = False) -> float:
         return self._get_presence(is_dm).k_prob(sid, time.time())
+
+    # ---- 评分快照/回补（JEV confirm 否决后还原 boost 消耗的评分） ----
+
+    def score_snapshot(self, sid: str, is_dm: bool = False) -> float:
+        """评分快照（原始累计分，不含闲时加分）：JEV 复核前存档。"""
+        return self._get_presence(is_dm).score(sid, time.time())
+
+    def score_restore(self, sid: str, snapshot: float, is_dm: bool = False) -> None:
+        """评分回补：JEV 否决把 boost 已消耗的清零还原——**单调不减**（max 语义，
+        否决期间新消息攒的分不丢）。仅在当前分低于快照时回补差值。"""
+        try:
+            presence = self._get_presence(is_dm)
+            cur = presence._scores.get(sid, 0.0)
+            if cur < snapshot:
+                presence._scores[sid] = float(snapshot)
+        except Exception:
+            pass
 
     def idle_bonus(self, sid: str) -> float:
         is_dm = False  # caller doesn't have context; group fallback
