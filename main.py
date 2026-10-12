@@ -5,9 +5,11 @@ import io
 import json
 import os
 import random
+import re
 import sys
 import time
 import wave
+import xml.etree.ElementTree as ET
 from typing import Optional
 
 # 插件管理器用 spec_from_file_location 加载 main.py，不会把插件目录加入 sys.path；
@@ -17,9 +19,9 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 # 热重载只重新 import main.py，sys.modules 里缓存的同目录模块不会更新；
-# 强制重载，避免改了 queue_merge / media_recognize / chat_enhance 后热重载不生效
+# 强制重载，避免改了 queue_merge / media_recognize / chat_enhance / jev 后热重载不生效
 import importlib
-for _m in ("queue_merge", "media_recognize", "chat_enhance"):
+for _m in ("queue_merge", "media_recognize", "chat_enhance", "jev"):
     if _m in sys.modules:
         try:
             importlib.reload(sys.modules[_m])
@@ -33,9 +35,17 @@ from core.chat.message_elements import Text, Image, Reply, Sticker, Forward, Rec
 from queue_merge import BatchMergeScheduler
 from media_recognize import ParallelMediaRecognizer
 from chat_enhance import ChatEnhanceEngine, _safe_int, _safe_float
+import jev as _jev_mod
 
 
 _SELF_PLUGIN_ID = "default-chat（z）"
+
+# JEV 默认场景指令（用户可在 section_jev 自定义；criteria 固定在 jev.TRIGGER_CRITERIA）
+_JEV_TRIGGER_PROMPT = (
+    "你是群聊机器人的插话裁判。机器人在旁观群消息，请判断它是否应该主动回复对话内容里的新消息。"
+    "只有内容明显值得回应（提问、分享、延续它的话题、场面需要它）才选 reply；"
+    "日常寒暄、表情、琐碎闲聊选 wait。"
+)
 
 
 # 当前任务上下文里「正在处理的 LLM 响应所属会话」（ignore/wake_extend tag 处理器用）。
@@ -346,8 +356,42 @@ class DebouncePlugin(BasePlugin):
         # 当前响应所属会话 + 60s 过期清理（见 _consume_ignore_sid）。
         self._ignore_ctx: dict = {}
 
+        # ========== 从 section_jev 读取 JEV 触发决策配置（可选，默认全关=旧行为） ==========
+        # z 版无持续对话/空停守望，JEV 只参与「群聊主动概率」触发的复核/补触发
+        self.jev_enabled = bool(_sec("section_jev", "jev_enabled", False))
+        # 判定后端：jev=TypeSafe System-One 决策模型（默认）；aux_llm=用 webui 已注册的
+        # 小模型做同类判断（生成式路径，延迟/成本更高，schema hint 已明示）
+        self.jev_backend = str(_sec("section_jev", "jev_backend", "jev") or "jev").strip().lower()
+        if self.jev_backend not in ("jev", "aux_llm"):
+            self.jev_backend = "jev"
+        self.jev_models = [str(x) for x in (_sec("section_jev", "jev_models", []) or []) if str(x).strip()]
+        self.jev_base_url = str(_sec("section_jev", "jev_base_url", "") or "").strip()
+        self.jev_api_key = str(_sec("section_jev", "jev_api_key", "") or "").strip()
+        self.jev_model_name = str(_sec("section_jev", "jev_model_name", "") or "").strip()
+        self.jev_timeout = max(0.5, _safe_float(_sec("section_jev", "jev_timeout_ms", 6000), 6000) / 1000.0)
+        self.jev_min_confidence = _safe_float(_sec("section_jev", "jev_min_confidence", 0.0), 0.0)
+        self.jev_proactive_mode = str(_sec("section_jev", "jev_proactive_mode", "off") or "off")
+        self.jev_trigger_prompt = str(_sec("section_jev", "jev_trigger_prompt", "") or "").strip() or _JEV_TRIGGER_PROMPT
+        self._jev_client = None       # JevClient 或 LlmJudgeClient（接口一致）
+        self._jev_links: list = []
+        self._jev_llm_clients: list = []
+        self._jev_link_displays: list = []
+        self._jev_resolve_logged = False
+        # JEV 后台判定在飞去重（(sid, scene)），同一会话同一场景不并发判断
+        self._jev_inflight: set = set()
+        self._jev_bg_tasks: set = set()
+
     async def initialize(self):
         logger.info(f"[Debounce] enabled (group media/forward/voice control, private unchanged)")
+        if self.jev_enabled:
+            logger.info(
+                f"[JEV] 触发决策已启用: proactive={self.jev_proactive_mode}, "
+                f"timeout={self.jev_timeout:.1f}s, min_conf={self.jev_min_confidence:.2f}"
+            )
+            try:
+                self._jev_resolve_links()
+            except Exception as e:
+                logger.warning(f"[JEV] 初始化解析模型链路失败: {e}")
         # 启动聊天增强引擎（存在感/骚扰/休眠/通知合并）
         self.enhance.start()
         # 启用媒体识别模块的框架 desc_img 安全接管（幂等；terminate 时还原）
@@ -479,6 +523,13 @@ class DebouncePlugin(BasePlugin):
         self.session_events.clear()
         # 清理合并调度器（重发 pending + 取消 tick）
         await self.merge_scheduler.shutdown()
+        # JEV：取消后台判定任务
+        for _t in list(self._jev_bg_tasks):
+            if not _t.done():
+                _t.cancel()
+        if self._jev_bg_tasks:
+            await asyncio.gather(*self._jev_bg_tasks, return_exceptions=True)
+        self._jev_bg_tasks.clear()
         # 关闭聊天增强引擎（await 等待 prune 任务退出）
         await self.enhance.shutdown()
         logger.debug("[Debounce] All debounce tasks cancelled")
@@ -746,6 +797,320 @@ class DebouncePlugin(BasePlugin):
             tool_set.remove(*to_remove)
             logger.debug(f"[Enhance] 已从 tool_set 移除工具: {to_remove}")
 
+    # ---- 静默判定（AI 空消息）—— 与 S 版同构：用于存在感统计跳过静默轮 ----
+    _REASONING_CLOSED = re.compile(
+        r'<\s*reasoning\b[^>]*>.*?<\s*/\s*reasoning\s*>', re.S | re.I)
+    _REASONING_OPEN = re.compile(r'<\s*reasoning\b', re.I)
+    _MSG_ANY = re.compile(r'<\s*msg\b', re.I)
+
+    def visible_output(self, xml: str) -> str:
+        """可见输出 = 去掉「思考过程」后的正文（与 S 版同口径）。
+
+        三种形态：成对闭合整体剥掉；未闭合且后面没有 <msg> 视为截断全剥；
+        未闭合但后面还有 <msg> 保守不剥。
+        """
+        t = re.sub(r'<!--.*?-->', '', xml or '', flags=re.S)
+        t = self._REASONING_CLOSED.sub('', t)
+        m = self._REASONING_OPEN.search(t)
+        if m and not self._MSG_ANY.search(t, m.end()):
+            t = t[:m.start()]
+        return t
+
+    @staticmethod
+    def _msg_is_empty(msg_el) -> bool:
+        """一个 <msg> 是否「发不出任何东西」（口径对齐框架真实产出）：
+        空白 <text> 不产出元素（算空）；其它标签空值也产出元素（算非空，保守）。"""
+        if (msg_el.text or '').strip():
+            return False
+        for c in msg_el:
+            if (c.tail or '').strip():
+                return False
+            if c.tag == 'text':
+                if (c.text or '').strip():
+                    return False
+                continue
+            return False
+        return True
+
+    def is_silent_output(self, xml: str) -> bool:
+        """bot 本轮是否什么都没发出去（= 静默轮）。畸形一律 False（保守）。"""
+        t = self.visible_output(xml)
+        if not t.strip():
+            return True
+        try:
+            root = ET.fromstring(f"<root>{t}</root>")
+        except Exception:
+            return False
+        msgs = root.findall('msg')
+        if not msgs:
+            return False
+        if (root.text or '').strip():
+            return False
+        if any((c.tail or '').strip() for c in root):
+            return False
+        return all(self._msg_is_empty(m) for m in msgs)
+
+    # ---- JEV 触发决策（可选，默认关；只参与群聊主动概率通路；后台执行零阻塞） ----
+
+    def _jev_resolve_links(self) -> None:
+        """jev_models（webui 已注册提供商模型多选）→ [(base, key, model)] 有序回退链；
+        显式手动字段作最后兜底。displays 只含可读名与端点主机，**绝不含密钥**。"""
+        links, displays = [], []
+        for ref in self.jev_models[:10]:
+            pid, mid = _jev_mod.split_ref(ref)
+            if not pid or not mid:
+                continue
+            try:
+                info = self.ctx.provider_mgr.get_model_info(pid, mid)
+            except Exception:
+                info = None
+            if not info:
+                logger.warning(f"[JEV] 模型组：{ref} 无法解析（提供商/模型已删除？），跳过")
+                continue
+            conf = getattr(info, "provider_config", None) or {}
+            base = _jev_mod._pick(conf, _jev_mod._BASE_KEYS)
+            key = _jev_mod._env(_jev_mod._pick(conf, _jev_mod._KEY_KEYS))
+            model = getattr(info, "model_name", None) or getattr(info, "model_id", "") or mid
+            if not base or not key:
+                logger.warning(f"[JEV] 模型组：{ref} 缺少接口地址或密钥，跳过")
+                continue
+            if (base, key, model) in links:
+                continue
+            links.append((base, key, model))
+            host = base.split("://", 1)[-1].split("/", 1)[0]
+            name = getattr(info, "model_name", None) or mid
+            provider = getattr(info, "provider_name", "") or pid
+            displays.append(f"{name} ({provider}) ⇒ {model}@{host}")
+        if self.jev_api_key:
+            base = self.jev_base_url or _jev_mod.DEFAULT_BASE_URL
+            model = self.jev_model_name or _jev_mod.DEFAULT_MODEL
+            link = (base, self.jev_api_key, model)
+            if link not in links:
+                links.append(link)
+                host = base.split("://", 1)[-1].split("/", 1)[0]
+                displays.append(f"手动 ⇒ {model}@{host}")
+        self._jev_links = links
+        self._jev_link_displays = displays
+
+    def _jev_resolve_llm_clients(self) -> None:
+        """aux_llm 后端：jev_models 引用 → [(ref, LLMModelClient)] 有序回退链。
+
+        双世代同构：`ctx.get_llm_client(model_uuid="provider:model")`（2.x/3.0 同签名）。
+        手动兜底三字段仅 JEV 后端用（小模型模式请用模型组下拉选择 webui 已注册模型）。
+        """
+        clients, displays = [], []
+        for ref in self.jev_models[:10]:
+            pid, mid = _jev_mod.split_ref(ref)
+            if not pid or not mid:
+                continue
+            client = None
+            try:
+                client = self.ctx.get_llm_client(model_uuid=ref)
+            except Exception:
+                client = None
+            if client is None:
+                logger.warning(f"[JEV·LLM] 模型组：{ref} 无法取到 LLM 客户端（提供商/模型已删除？），跳过")
+                continue
+            clients.append((ref, client))
+            try:
+                info = self.ctx.provider_mgr.get_model_info(pid, mid)
+                name = getattr(info, "model_name", None) or mid
+                provider = getattr(info, "provider_name", "") or pid
+                displays.append(f"{name} ({provider})")
+            except Exception:
+                displays.append(ref)
+        self._jev_llm_clients = clients
+        self._jev_link_displays = displays
+
+    def _get_jev_client(self):
+        """取判定客户端（懒解析 + 熔断复用）；未启用/无可用链路 → None。
+
+        后端分派：jev → JevClient（systemone 决策模型）；aux_llm → LlmJudgeClient
+        （webui 已注册小模型，生成式路径）。两者 decide_trigger 接口一致。
+        """
+        if not self.jev_enabled:
+            return None
+        if self._jev_client is not None:
+            return self._jev_client if self._jev_client.ready else None
+        if self.jev_backend == "aux_llm":
+            if not getattr(self, "_jev_llm_clients", None):
+                try:
+                    self._jev_resolve_llm_clients()
+                except Exception as e:
+                    logger.warning(f"[JEV·LLM] 解析模型链路失败（本次不启用）: {e}")
+                    return None
+                if not self._jev_resolve_logged:
+                    self._jev_resolve_logged = True
+                    if self._jev_llm_clients:
+                        logger.info(f"[JEV·LLM] 小模型判官链路（生成式，延迟/成本高于 JEV）: "
+                                    f"{' → '.join(self._jev_link_displays)}")
+                    else:
+                        logger.warning("[JEV·LLM] 已启用但没有可用模型（模型组为空），JEV 不生效")
+            if not getattr(self, "_jev_llm_clients", None):
+                return None
+            self._jev_client = _jev_mod.LlmJudgeClient(
+                self._jev_llm_clients, self.jev_timeout, self.jev_min_confidence, logger)
+            return self._jev_client
+        if not self._jev_links:
+            try:
+                self._jev_resolve_links()
+            except Exception as e:
+                logger.warning(f"[JEV] 解析模型链路失败（本次不启用）: {e}")
+                return None
+            if not self._jev_resolve_logged:
+                self._jev_resolve_logged = True
+                if self._jev_links:
+                    logger.info(f"[JEV] 决策链路: {' → '.join(self._jev_link_displays)}")
+                else:
+                    logger.warning("[JEV] 已启用但没有可用链路（模型组为空且手动兜底未填），JEV 不生效")
+        if not self._jev_links:
+            return None
+        cfg = _jev_mod.JevConfig(enabled=True, links=self._jev_links,
+                                 timeout=self.jev_timeout,
+                                 min_confidence=self.jev_min_confidence)
+        self._jev_client = cfg.client(logger)
+        return self._jev_client
+
+    @staticmethod
+    def _jev_mode_has(mode: str, kind: str) -> bool:
+        """模式串是否含 confirm/boost 语义（off/confirm/boost/confirm_boost）。"""
+        mode = (mode or "off").strip().lower()
+        if kind == "confirm":
+            return mode in ("confirm", "confirm_boost")
+        if kind == "boost":
+            return mode in ("boost", "confirm_boost")
+        return False
+
+    def _render_msgs_for_jev(self, messages: list, max_msgs: int = 10,
+                             per_msg: int = 300, total: int = 2000) -> str:
+        """把消息列表渲染成 JEV state 文本（昵称: 内容；媒体占位；从旧侧丢，保最新）。"""
+        lines = []
+        for m in messages[-max_msgs:]:
+            try:
+                nick = getattr(getattr(m, "sender", None), "nickname", "") or "?"
+                parts = []
+                for elem in (getattr(m, "chain", None) or []):
+                    if isinstance(elem, Text):
+                        parts.append(elem.text or "")
+                    elif isinstance(elem, Image):
+                        parts.append(f"[图片 {elem.caption}]" if getattr(elem, "caption", None) else "[图片]")
+                    elif isinstance(elem, Sticker):
+                        parts.append(f"[表情包 {elem.caption}]" if getattr(elem, "caption", None) else "[表情包]")
+                    elif isinstance(elem, Record):
+                        parts.append("[语音]")
+                    elif isinstance(elem, Forward):
+                        parts.append("[转发消息]")
+                    elif isinstance(elem, Reply):
+                        parts.append("[引用回复]")
+                text = "".join(parts).strip()
+                if not text:
+                    continue
+                lines.append(f"[{nick}] {text[:per_msg]}")
+            except Exception:
+                continue
+        out = "\n".join(lines)
+        if len(out) > total:
+            out = out[-total:]     # 从旧侧丢，保最新
+        return out
+
+    async def _jev_judge(self, sid: str, state: str, scene: str):
+        """一次 JEV 触发判断 → 'reply' / 'wait' / None（失败或低置信弃权）。"""
+        client = self._get_jev_client()
+        if client is None or not state:
+            return None
+        try:
+            res = await client.decide_trigger(state, self.jev_trigger_prompt)
+        except Exception:
+            return None
+        if not res or res.get("_abstain"):
+            if res:
+                logger.debug(f"[JEV] {scene} {sid} 低置信弃权（conf={res.get('confidence'):.2f}）")
+            return None
+        choice = res.get("choice")
+        logger.info(
+            f"[JEV] {scene} {sid} 判定 {choice}（conf={res.get('confidence'):.2f} "
+            f"P={res.get('probabilities')} model={res.get('model')}）"
+        )
+        return choice if choice in ("reply", "wait") else None
+
+    def _jev_spawn(self, key, coro) -> None:
+        """后台执行 JEV 相关协程：同 key 在飞去重；任务集合强引用防 GC；异常自吞。"""
+        if key in self._jev_inflight:
+            return
+        self._jev_inflight.add(key)
+
+        async def _runner():
+            try:
+                await coro
+            except Exception as e:
+                logger.warning(f"[JEV] 后台任务异常（{key}）: {type(e).__name__}: {e}")
+            finally:
+                self._jev_inflight.discard(key)
+
+        task = asyncio.create_task(_runner())
+        self._jev_bg_tasks.add(task)
+        task.add_done_callback(self._jev_bg_tasks.discard)
+
+    async def _await_message_in_buffer(self, sid: str, mid, timeout: float = 3.0):
+        """等某条消息真正落进会话缓冲（handle_msg 钩子跑在框架 buffer.add 之前）。"""
+        if mid is None:
+            return None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                buf = self.ctx.get_buffer(sid)
+                for item in list(getattr(buf, "buffer", None) or []):
+                    m = getattr(item, "message", item)
+                    if m is not None and getattr(m, "message_id", None) == mid:
+                        return m
+            except Exception:
+                return None
+            await asyncio.sleep(0.02)
+        return None
+
+    def _collect_buffer_msgs(self, sid: str, limit: int = 10) -> list:
+        """取会话缓冲里的消息对象列表（末尾 limit 条）。"""
+        try:
+            buf = self.ctx.get_buffer(sid)
+            msgs = []
+            for item in list(getattr(buf, "buffer", None) or []):
+                m = getattr(item, "message", item)
+                if m is not None:
+                    msgs.append(m)
+            return msgs[-limit:]
+        except Exception:
+            return []
+
+    async def _jev_deferred_trigger(self, sid: str, mid, scene: str, mechanical_hit: bool,
+                                    score_snapshot=None):
+        """主动概率掷骰点的 JEV 延迟判定（confirm 复核 / boost 补触发）。
+
+        在 handle_msg 里以后台任务方式启动（消息管线零阻塞）：先等消息落地，
+        再拿当前缓冲内容交 JEV；JEV 明确表态 ⇒ 以其为准，否则机械结果照旧。
+        确认触发时 flush 整个会话缓冲（与既有主动触发同语义）。
+        否决时把评分门 boost 已消耗的累计分回补到快照值（单调不减）。
+        """
+        try:
+            m = await self._await_message_in_buffer(sid, mid)
+            if m is None:
+                return
+            state = self._render_msgs_for_jev(self._collect_buffer_msgs(sid))
+            decision = await self._jev_judge(sid, state, scene)
+            trigger = mechanical_hit if decision is None else (decision == "reply")
+            if not trigger:
+                if mechanical_hit and score_snapshot is not None:
+                    self.enhance.score_restore(sid, score_snapshot)
+                    logger.debug(f"[JEV] {scene} {sid} 否决 ⇒ 评分回补至快照 {score_snapshot:.1f}")
+                logger.debug(f"[JEV] {scene} {sid} 最终不触发（机械={mechanical_hit}, JEV={decision}）")
+                return
+            logger.info(f"[JEV] {scene} {sid} 判定触发（机械={mechanical_hit} → JEV={decision}）")
+            try:
+                await self.ctx.message_processor.flush_session_messages(sid)
+            except Exception:
+                logger.exception(f"[JEV] {scene} {sid} flush 失败")
+        except Exception as e:
+            logger.warning(f"[JEV] 延迟判定异常（{scene} {sid}）: {type(e).__name__}: {e}")
+
     async def _process_media(self, chain, is_mentioned: bool, is_private: bool = False):
         """处理消息链中的图片、动画表情、合并转发消息和语音。
 
@@ -946,7 +1311,11 @@ class DebouncePlugin(BasePlugin):
             scope = "mentioned_dm" if is_dm else "mentioned"
             mentioned_gate = self.enhance.score_gate(sid, True, scope=scope, is_dm=is_dm)
             if not mentioned_gate:
-                event.is_mentioned = False
+                # ⚠ 必须写 message.is_mentioned：两代框架的 KiraMessageEvent.is_mentioned
+                #   都是**只读 property**（读 message.is_mentioned），直接对 event 赋值会
+                #   AttributeError → 钩子异常吞掉、事件策略停在默认 discard → 整条消息
+                #   被静默丢弃（该分支此前从未真正生效过，属潜伏崩溃）。
+                event.message.is_mentioned = False
                 # P1 修复：_process_media 已按「唤醒」把图片/表情置为待识别（caption=""、
                 # 未打 _media_skip），若此处降级为围观却不回补标记，stage2 仍会对这些
                 # 媒体跑 VLM/STT —— 消息最终不触发 LLM，识别成本全部白付（VLM 泄露）。
@@ -1014,6 +1383,11 @@ class DebouncePlugin(BasePlugin):
                         prob *= _kf
                     _rand = random.random()
                     prob_hit = _rand < prob
+                    # JEV confirm 模式：评分门 boost 可能清零累计分——先存档快照，
+                    # 若 JEV 否决则在延迟任务里回补（弃权/确认不动分）
+                    _snap = self.enhance.score_snapshot(_psid) if (
+                        self.jev_enabled and self._jev_mode_has(self.jev_proactive_mode, "confirm")
+                    ) else None
                     _gate = self.enhance.score_gate(_psid, prob_hit)
                     logger.debug(
                         f"[Sustain] 群 {_psid} 积极概率判定: 概率 {self.group_proactive_chat_probability:.2f}"
@@ -1023,10 +1397,26 @@ class DebouncePlugin(BasePlugin):
                     )
                     # 评分补正：评分不足概率命中作废；评分够概率未命中补触发
                     if _gate:
-                        logger.info("[Chat] Triggered proactive chat")
-                        # 本条会被立即推出（连同它的媒体）→ 补预取标记（stage1 末尾调度）
-                        event.message._batch_entered = True
-                        event.flush()
+                        if self.jev_enabled and self._jev_mode_has(self.jev_proactive_mode, "confirm"):
+                            # JEV 复核（后台，零阻塞）：确认后才 flush；弃权/失败 ⇒ 机械命中照旧
+                            event.message._batch_entered = True
+                            self._jev_spawn(
+                                (sid, "proactive"),
+                                self._jev_deferred_trigger(
+                                    _psid, getattr(event.message, "message_id", None),
+                                    "proactive", True, score_snapshot=_snap))
+                        else:
+                            logger.info("[Chat] Triggered proactive chat")
+                            # 本条会被立即推出（连同它的媒体）→ 补预取标记（stage1 末尾调度）
+                            event.message._batch_entered = True
+                            event.flush()
+                    elif self.jev_enabled and self._jev_mode_has(self.jev_proactive_mode, "boost"):
+                        # JEV 补触发（后台）：机械未命中时给一次语义补判，reply 才 flush
+                        self._jev_spawn(
+                            (sid, "proactive"),
+                            self._jev_deferred_trigger(
+                                _psid, getattr(event.message, "message_id", None),
+                                "proactive", False))
             else:
                 event.discard()
             return
@@ -1264,7 +1654,11 @@ class DebouncePlugin(BasePlugin):
         # 聊天增强引擎：存在感记录 + 休眠维持期（仅最终文本回复时，工具中间步不记）
         if getattr(resp, "tool_calls", None):
             return
-        self.enhance.on_llm_response(event, resp)
+        # 静默轮（bot 只输出空 msg，什么都没发出去）不计"bot 发言"、不推进休眠
+        # 维持期 —— 静默不是发言（对齐 S 版口径；z 的群聊提示词同样教模型 <msg/> 沉默）
+        ai_text = (getattr(resp, "text_response", "") or "").strip()
+        ai_silent = self.is_silent_output(ai_text)
+        self.enhance.on_llm_response(event, resp, silent=ai_silent)
         # 休眠维持期次数限制：达上限则结束维持期（wake_max_rounds 生效）
         try:
             sid = str(event.sid)
