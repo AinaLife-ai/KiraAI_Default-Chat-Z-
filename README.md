@@ -1,8 +1,8 @@
-# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.9.0
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.0
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
-修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。v1.8.4，KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）。
+修改原版默认所有语音、图片、合并转发都识别的逻辑，减轻小水管模型负担。KiraAI 2.29.6+ 可用（原生多模态兼容需 2.31.0+）；**同时兼容 3.0（含 v3.0.0-rc.1）**。
 
 默认仅唤醒消息（at/关键词/引用回复）中的语音、图片、转发才会识别。关闭对应开关后，非唤醒消息的图片按概率和数量选取，语音/转发全部阅读。
 
@@ -16,6 +16,7 @@
 - **休眠时段**：可配休眠时间窗 + 起夜概率 + 维持期（续窗/一次性/次数上限）
 - **热重载不丢消息**：终止时积压批次安全重发，消息不丢失
 - **原生多模态兼容**：native 图片模式下图片保留在链中由框架原生直传（官方压缩 + 持久化引用），本插件不预置 caption、不截断数量限制；转发/语音策略照旧（转发仅唤醒才保留、语音 STT 由本插件处理）
+- **JEV 触发决策（可选 · 默认关）**：主动概率掷骰之外加一层语义裁判——[JEV（TypeSafe System-One）](https://typesafe.ai/) 不生成文本、只输出「reply/wait + 置信度」（输入 $0.042/MTok、输出免费、70~500ms）；命中后可复核否决（confirm）、未命中可补判拉起（boost）；否决时评分门 boost 已清的分自动回补（单调不减）；熔断/弃权一律回退机械逻辑，后台执行零阻塞。模型在 `section_jev` 下拉多选（借道 webui 已注册提供商，有序回退链），也可用 `aux_llm` 后端拿任意小模型当判官（延迟/成本更高，配置页有明示）
 
 想要更多能力？推荐安装 **sustained-chat**（[KiraAI_sustained_chat_plugin](https://github.com/znq19/KiraAI_sustained_chat_plugin)），支持群聊持续对话、私聊主动、定时任务等完整主动社交能力。
 
@@ -31,6 +32,26 @@
 
 <details>
 <summary>更新日志</summary>
+
+### v1.10.0
+
+- **修复「评分降级整链丢弃」（潜伏崩溃）**：评分不足降级提及消息时对两代框架的
+  只读 property `event.is_mentioned` 赋值必抛 AttributeError → 整条消息被静默丢弃
+  （该分支此前从未真正生效）。改写 `event.message.is_mentioned` 后修复。
+- **存在感统计修正**：静默轮（bot 只输出空 msg）不再计"bot 发言"、不推进休眠维持期
+  （引入 `visible_output/is_silent_output`，与 sustained-chat 同口径）；修复
+  `on_message_sent` 双计存在感发言（按轮 + 按条重复计数，导致占比虚高、节流偏严）。
+- **新增 JEV 触发决策（可选，默认关 = 旧行为）**：主动概率触发的 confirm（复核否决）/
+  boost（补触发）/confirm_boost；评分互洽（否决回补 boost 清分）；弃权/失败/熔断一律
+  回退机械逻辑；全部后台执行零阻塞消息管线；模型走 webui 提供商下拉多选（有序回退链）
+  + 手动兜底；`aux_llm` 后端可用 webui 已注册小模型当判官（hint 明示延迟/成本更高）。
+- **VLM 守卫修复**（media_recognize，与 sustained-chat 逐字节一致）：`desc_img` 接管
+  完全绕行表情包库文件（`data/sticker/`）——此前内置「默认表情包」插件入库描述会被
+  聊天口径拦截（缓存错配 / 空串永久写入 / 超时缩水）；聊天时媒体识别守卫语义零变化。
+  包装清单补齐 3.0 渲染模块（`core.workflow.src.im.message_formatter`）。
+- **3.0 rc1 兼容**：`get_effective_capabilities` 异步化 ⇒ 同步读点探测协程即关、
+  切缓存通道（每条消息的守卫钩子异步预热，30s TTL；旧世代定型后零成本短路）。
+  全部按特征识别实现，无版本号判定，未来 3.x 形态变化自动适配。
 
 ### v1.9.0
 
