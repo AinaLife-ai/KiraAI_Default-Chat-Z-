@@ -1,4 +1,4 @@
-# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.0
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.1
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
@@ -32,6 +32,22 @@
 
 <details>
 <summary>更新日志</summary>
+
+### v1.10.1
+
+- **修复线上报错：`logger.DEBUG` 不存在 ⇒ `on_im_message` 整条中断**（KiraAI v2.16.1 实测）：
+  `chat_enhance.py` 里 `if _delta and logger.DEBUG:` —— `DEBUG` 是标准库 **`logging` 模块**上的常量，
+  **logger 实例没有**这个属性 ⇒ `AttributeError`。异常从 `on_im_message` 冒出去 ⇒
+  该函数**从这一行整条中断**：它后面的**骚扰检测 / 休眠判定全被跳过**（用户侧静默失效，
+  只在日志里留一条 ERROR）。触发条件：用户消息命中**加分词/减分词**（`_delta != 0`）——
+  只要配了关键词就会反复出现。
+- 改为 `_debug_enabled(logger)`：标准库语义 `isEnabledFor(logging.DEBUG)`；
+  这个 logger 没有该 API、或调用抛错 ⇒ **保守返回 False**（判错的最坏后果只是少打一行
+  debug 明细，**绝不影响功能**）。
+- 新增套件 `tests/test_logger_level_guard.py`（已登记进 `tests/run_tests.py`）：
+  AST 静态扫描、`_debug_enabled` 的四种边界、以及**真 `on_im_message` 端到端**；
+  反向验证：跑在修前代码上会复现线上报错（`\'_Logger\' object has no attribute \'DEBUG\'`）。
+- 版本 v1.10.0 → v1.10.1
 
 ### v1.10.0
 
