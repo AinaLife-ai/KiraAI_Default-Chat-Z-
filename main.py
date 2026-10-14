@@ -1231,7 +1231,14 @@ class DebouncePlugin(BasePlugin):
         try:
             _self_id = str(event.message.self_id) if getattr(event.message, "self_id", None) is not None else None
             _sender_id = str(event.message.sender.user_id) if event.message.sender else None
-            if _self_id and _sender_id and _self_id == _sender_id:
+            # ⚠ notice 事件必须排除在外：适配器构造 notice 时 sender.user_id 取的就是
+            #   notice.user_id，而「bot 自己被禁言 / 被解除禁言」（group_ban: self_id == user_id）
+            #   的 user_id 正是 bot 自己 ⇒ _self_id == _sender_id 成立，会被这里当"自己的回声"
+            #   丢掉，于是 QQ增强 注入的 [System …禁言了你120秒] 永远进不了 LLM（线上实测：
+            #   bot 事后声称"没收到任何通知"）。
+            #   放行是安全的：notice 不参与存在感/评分/骚扰统计（见 chat_enhance._is_system_event），
+            #   不会污染统计；无内容的通知仍由紧随其后的「空通知事件过滤」丢弃。
+            if _self_id and _sender_id and _self_id == _sender_id and not getattr(event, "is_notice", False):
                 logger.debug(f"[Enhance] 忽略机器人自己的消息: {event.message.message_id}")
                 event.discard()
                 return
