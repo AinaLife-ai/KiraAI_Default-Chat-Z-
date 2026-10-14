@@ -1105,7 +1105,7 @@ class DebouncePlugin(BasePlugin):
                 return
             logger.info(f"[JEV] {scene} {sid} 判定触发（机械={mechanical_hit} → JEV={decision}）")
             try:
-                await self.ctx.message_processor.flush_session_messages(sid)
+                await self.ctx.flush_session_messages(sid)
             except Exception:
                 logger.exception(f"[JEV] {scene} {sid} flush 失败")
         except Exception as e:
@@ -1502,7 +1502,7 @@ class DebouncePlugin(BasePlugin):
                     self.batch_started.pop(sid, None)
                     self.batch_count.pop(sid, None)
                     try:
-                        await self.ctx.message_processor.flush_session_messages(sid)
+                        await self.ctx.flush_session_messages(sid)
                     except Exception:
                         logger.exception(f"[Debounce] Error flushing session {sid}")
                     return
@@ -1570,7 +1570,7 @@ class DebouncePlugin(BasePlugin):
                 if self._merge_debug:
                     logger.info(f"[Debounce] 顺延结束 session={sid}（{self.merge_window_seconds}s 无新消息），flush {buffer_len} 条")
                 try:
-                    await self.ctx.message_processor.flush_session_messages(sid)
+                    await self.ctx.flush_session_messages(sid)
                 except Exception:
                     logger.exception(f"[Debounce] Error flushing session {sid}")
                 # 批次已随 flush 送出，清理批次状态（下一批从 0 开始）

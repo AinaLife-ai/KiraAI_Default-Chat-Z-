@@ -1,4 +1,4 @@
-# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.2
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.3
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
@@ -32,6 +32,11 @@
 
 <details>
 <summary>更新日志</summary>
+
+### v1.10.3
+
+  - 兼容 KiraAI 3.0 GA 弃用面：`ctx.message_processor.flush_session_messages` → `ctx.flush_session_messages`（两代等价）；合并批次事件构造改双世代字段探测（3.0=supported_elements）。
+  - 测试桩补齐 ctx 级委托；2.x/3.0 GA 全套件通过。
 
 ### v1.10.2
 
