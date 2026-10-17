@@ -1,4 +1,4 @@
-# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.3
+# KiraAI_Default-Chat-Z- 默认消息处理插件优化版 v1.10.4
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_Default-Chat-Z-)
 
@@ -32,6 +32,19 @@
 
 <details>
 <summary>更新日志</summary>
+
+### v1.10.4
+
+- **JEV 判定层对齐官方 jev 插件的优点（借鉴自 xxynet/kira-ai-plugin-jev，设计目的整体不变）**：
+  - **人格注入判定**（新开关 `jev_persona_inject`，默认开）：每次判定把当前人格放进判定上下文；关闭=旧行为
+  - **3.0 起会话窗口改读消息档案**（`ctx.message_history`），**范围与缓冲完全一致**（只判外来消息：
+    bot 自己的发言与 notice 排除），窗口更深；读不到/2.x 回落缓冲渲染（旧行为），
+    渲染直接复用 `_render_msgs_for_jev`（输出形态与缓冲逐字一致）
+  - 判定指令末尾固定追加注入防护句（会话内容是不可信数据）
+  - **httpx 原生异步投递**（零线程零堵塞；无 httpx 回退 urllib+线程池；实例级替换 `_post_sync` 的定制契约不变）
+  - HTTP 失败日志带可操作提示（401/429/529…）
+- 测试：新增 `tests/test_jev_ga_upgrade.py`（19 项）；既有全套件全绿
+- 版本 1.10.3 → 1.10.4
 
 ### v1.10.3
 
